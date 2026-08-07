@@ -1,0 +1,52 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // admins/{uid} — faqat konsoldan qo'lda yaratiladi (README'ga qarang).
+    // Hech kim o'zini admin qilib yoza olmaydi.
+    match /admins/{uid} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // users/{uid} — o'qituvchi profili va tasdiqlash holati
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create: if isOwner(uid)
+                    && request.resource.data.role == 'teacher'
+                    && request.resource.data.status in ['pending', 'incomplete'];
+      // Foydalanuvchi faqat o'zining profil ma'lumotlarini (status'dan tashqari) yangilaya oladi;
+      // statusni faqat admin o'zgartira oladi. Google-registratsiyani yakunlashda
+      // foydalanuvchi status'ni 'incomplete' -> 'pending' ga o'zgartirishi mumkin.
+      allow update: if isAdmin() ||
+                    (isOwner(uid) &&
+                     resource.data.status == 'incomplete' &&
+                     request.resource.data.status == 'pending');
+      allow delete: if isAdmin();
+    }
+
+    // groups/{groupId} — faqat egasi bo'lgan o'qituvchi CRUD qila oladi
+    match /groups/{groupId} {
+      allow read: if isSignedIn() && (resource.data.teacherId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.teacherId == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.teacherId == request.auth.uid;
+    }
+
+    // students/{studentId} — faqat guruh egasi bo'lgan o'qituvchi CRUD qila oladi
+    match /students/{studentId} {
+      allow read: if isSignedIn() && (resource.data.teacherId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.teacherId == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.teacherId == request.auth.uid;
+    }
+  }
+}
