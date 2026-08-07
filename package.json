@@ -1,0 +1,18 @@
+{
+  "name": "tugarak-plus",
+  "version": "1.0.0",
+  "private": true,
+  "description": "To'garak boshqaruv tizimi — Firebase backend bilan",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "firebase": "^11.0.2"
+  },
+  "devDependencies": {
+    "vite": "^5.4.10"
+  }
+}
