@@ -87,7 +87,8 @@ watchAuth(async (user) => {
 
   if (!user) {
     state.role = null; state.userDoc = null;
-    if (['adminDash', 'teacherDash', 'teacherPending', 'googleComplete'].includes(state.view)) state.view = 'landing';
+    const publicViews = ['landing', 'teacherAuth', 'adminAuth'];
+    if (!publicViews.includes(state.view)) state.view = 'landing';
     render();
     return;
   }
