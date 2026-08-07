@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TUGARAK+ | Boshqaruv tizimi</title>
+<meta name="description" content="Maktabdan tashqari to'garaklarni boshqarish tizimi — o'qituvchi ro'yxatdan o'tishi, o'quvchilar ro'yxati, baholash va hisobotlar.">
+<link rel="icon" type="image/svg+xml" href="/logo-mark.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+<div id="app"><div class="spinner"></div></div>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
