@@ -5,9 +5,11 @@ import {
 } from './auth.js';
 import {
   watchAllTeachers, setTeacherStatus, watchMyGroups, createGroup,
-  watchGroupStudents, addStudent, deleteStudent, addGrade
+  watchGroupStudents, addStudent, deleteStudent, addGrade,
+  watchNotifications, createNotification
 } from './db.js';
 import { auth } from './firebase.js';
+import { parseRosterFile } from './importParsers.js';
 
 /** Rasmni kichraytirib, siqilgan base64 (JPEG) shaklga o'giradi.
  *  Firebase Storage o'rniga to'g'ridan-to'g'ri Firestore'da saqlash uchun
@@ -58,9 +60,10 @@ let state = {
   regForm: { name: '', email: '', phone: '', password: '' },
   loginForm: { email: '', password: '' },
   contractReturnView: null,
+  notifications: [],
 };
 
-let unsubTeachers = null, unsubGroups = null, unsubStudents = null;
+let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null;
 const uid = () => 'x' + Math.random().toString(36).slice(2, 9);
 
 function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -93,14 +96,19 @@ watchAuth(async (user) => {
   if (unsubTeachers) { unsubTeachers(); unsubTeachers = null; }
   if (unsubGroups) { unsubGroups(); unsubGroups = null; }
   if (unsubStudents) { unsubStudents(); unsubStudents = null; }
+  if (unsubNotifications) { unsubNotifications(); unsubNotifications = null; }
 
   if (!user) {
-    state.role = null; state.userDoc = null;
+    state.role = null; state.userDoc = null; state.notifications = [];
     const publicViews = ['landing', 'teacherAuth', 'adminAuth', 'contractView'];
     if (!publicViews.includes(state.view)) state.view = 'landing';
     render();
     return;
   }
+
+  // Tizimga kirgan har qanday foydalanuvchi (admin yoki o'qituvchi)
+  // bildirishnomalarni ko'ra oladi.
+  unsubNotifications = watchNotifications(list => { state.notifications = list; render(); });
 
   const admin = await isAdmin(user.uid, user.email);
   if (admin) {
@@ -174,13 +182,20 @@ function sealSVG(size) {
   </svg>`;
 }
 
+function hasUnreadNotifications() {
+  const seenCount = parseInt(localStorage.getItem('notif-seenCount') || '0');
+  return state.notifications.length > seenCount;
+}
+
 function topbar() {
   const who = state.role === 'admin' ? 'Administrator' : (state.userDoc?.fullName || state.firebaseUser?.displayName || '');
+  const unread = state.firebaseUser && hasUnreadNotifications();
   return `<div class="topbar">
     <div class="brandwrap">${sealSVG(34)}<div class="brand">TUGARAK<span>+</span></div></div>
     <div class="topbar-right">
       <button class="theme-toggle" id="themeToggle" aria-label="Tun/kun rejimi"></button>
-      ${state.firebaseUser ? `<div class="userchip"><div class="avatar-sm">${esc((who || '?').slice(0, 1).toUpperCase())}</div><span>${esc(who || '')}</span></div>
+      ${state.firebaseUser ? `<button class="logout-btn" id="notifBell" style="position:relative;font-size:16px;line-height:1;">\u{1F514}${unread ? '<span style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:var(--danger);"></span>' : ''}</button>
+      <div class="userchip"><div class="avatar-sm">${esc((who || '?').slice(0, 1).toUpperCase())}</div><span>${esc(who || '')}</span></div>
       <button class="logout-btn" id="logoutBtn">Chiqish</button>` : ''}
     </div>
   </div>`;
@@ -334,6 +349,15 @@ function renderAdminDash() {
     <div class="stat-card"><div class="num">${rejected.length}</div><div class="lbl">Rad etilgan</div></div>
   </div>
   <div class="card">
+    <h2>\u{1F4E2} Bildirishnoma yuborish</h2>
+    <div class="muted">Barcha tizim foydalanuvchilariga (o'qituvchilarga) bir vaqtning o'zida bildirishnoma yuboring \u2014 ular qo'ng'iroq (\u{1F514}) belgisi orqali ko'radi.</div>
+    <div class="divider"></div>
+    <label>Sarlavha</label><input type="text" id="notifTitle" placeholder="Masalan: Yig'ilish haqida e'lon">
+    <label>Xabar matni</label>
+    <textarea id="notifMessage" rows="3" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:14px;font-family:inherit;" placeholder="Xabar matnini shu yerga yozing..."></textarea>
+    <button class="btn btn-teal" id="sendNotifBtn" style="margin-top:12px;">Yuborish</button>
+  </div>
+  <div class="card">
     <h2>Tasdiqlash kutilayotgan arizalar</h2>
     <div class="muted">Har bir o'qituvchining shartnomani qabul qilganini tekshirib, tasdiqlang yoki rad eting.</div>
     <div class="divider"></div>
@@ -398,6 +422,7 @@ function renderGroupPanel(group) {
       <div style="display:flex;gap:8px;" class="no-print">
         <button class="btn btn-outline" id="addManualBtn">+ Qo'lda qo'shish</button>
         <button class="btn btn-outline" id="addPhotoBtn">\u{1F4F7} Rasmdan yuklash</button>
+        <button class="btn btn-outline" id="bulkImportBtn">\u{1F4D1} Fayldan yuklash (Excel/Word/CSV)</button>
         <button class="btn btn-primary" id="printBtn">\u{1F5A8} Tekshiruvchi uchun eksport</button>
       </div>
     </div>
@@ -476,6 +501,34 @@ function renderModal() {
         <button class="btn btn-teal block" id="agSave">Saqlash</button>
       </div></div></div>`;
   }
+  if (m.type === 'bulkImport') {
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:520px;">
+      <h2>\u{1F4D1} Fayldan o'quvchilar ro'yxatini yuklash</h2>
+      <div class="muted">Excel (.xlsx), CSV yoki Word (.docx) faylini tanlang \u2014 o'quvchilar ismlari avtomatik aniqlanadi va pastdagi jadvalga tushadi.</div>
+      <div class="upload-drop" id="bulkFileDropZone" style="margin-top:12px;">
+        <input type="file" id="bulkFileInput" accept=".csv,.xlsx,.xls,.docx" style="display:none;">
+        \u{1F4E4} Faylni tanlash uchun bosing
+      </div>
+      <label>Sinf (barcha o'quvchilar uchun, ixtiyoriy)</label><input type="text" id="bulkClass" placeholder="Masalan: 6-A">
+      <label>Aniqlangan ismlar (tekshirib, kerak bo'lsa tahrirlang \u2014 har bir qator alohida o'quvchi)</label>
+      <textarea id="bulkNamesArea" rows="8" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:13.5px;font-family:inherit;" placeholder="Fayl tanlanganda ismlar shu yerga chiqadi. Xohlasangiz, qo'lda ham yozishingiz mumkin (har qatorga bitta ism)."></textarea>
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">Bekor qilish</button>
+        <button class="btn btn-teal block" id="bulkSave">Barchasini qo'shish</button>
+      </div></div></div>`;
+  }
+  if (m.type === 'notifications') {
+    return `<div class="modal-bg" id="modalBg"><div class="modal">
+      <h2>\u{1F514} Bildirishnomalar</h2>
+      ${state.notifications.length === 0 ? `<div class="empty"><div class="big-icon">\u{1F4EC}</div>Hozircha bildirishnoma yo'q</div>` :
+        state.notifications.map(n => `<div style="padding:12px 0;border-bottom:1px solid var(--line);">
+          <b>${esc(n.title)}</b>
+          <div class="muted" style="margin:4px 0;white-space:pre-wrap;">${esc(n.message)}</div>
+          <div class="muted" style="font-size:11px;">${n.createdAt?.toDate ? n.createdAt.toDate().toLocaleString('uz-UZ') : 'hozirgina'}</div>
+        </div>`).join('')}
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:16px;">Yopish</button>
+    </div></div>`;
+  }
   return '';
 }
 
@@ -489,6 +542,11 @@ function attachHandlers() {
   document.getElementById('logoutBtn')?.addEventListener('click', async () => {
     await logout();
     state.view = 'landing'; state.activeGroupId = null; state.pendingRegisterContract = false;
+  });
+  document.getElementById('notifBell')?.addEventListener('click', () => {
+    localStorage.setItem('notif-seenCount', String(state.notifications.length));
+    state.modal = { type: 'notifications' };
+    render();
   });
   document.querySelectorAll('[data-goto]').forEach(el => el.addEventListener('click', () => { state.view = el.dataset.goto; render(); }));
   document.querySelectorAll('[data-tab]').forEach(el => el.addEventListener('click', () => { state.authTab = el.dataset.tab; render(); }));
@@ -594,6 +652,13 @@ function attachHandlers() {
   document.querySelectorAll('[data-reject]').forEach(el => el.addEventListener('click', async () => {
     await setTeacherStatus(el.dataset.reject, 'rejected'); toast('Ariza rad etildi.', 'info');
   }));
+  document.getElementById('sendNotifBtn')?.addEventListener('click', async () => {
+    const title = document.getElementById('notifTitle').value.trim();
+    const message = document.getElementById('notifMessage').value.trim();
+    if (!title || !message) { toast('Sarlavha va xabar matnini kiriting.', 'error'); return; }
+    try { await createNotification(title, message); toast('Bildirishnoma barchaga yuborildi.', 'info'); render(); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+  });
 
   /* Teacher dashboard */
   document.getElementById('newGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'newGroup' }; render(); });
@@ -602,6 +667,7 @@ function attachHandlers() {
   }));
   document.getElementById('addManualBtn')?.addEventListener('click', () => { state.modal = { type: 'addManual' }; render(); });
   document.getElementById('addPhotoBtn')?.addEventListener('click', () => { state.modal = { type: 'addPhoto' }; render(); });
+  document.getElementById('bulkImportBtn')?.addEventListener('click', () => { state.modal = { type: 'bulkImport' }; render(); });
   document.getElementById('printBtn')?.addEventListener('click', () => window.print());
   document.querySelectorAll('[data-addgrade]').forEach(el => el.addEventListener('click', () => { state.modal = { type: 'addGrade', studentId: el.dataset.addgrade }; render(); }));
   document.querySelectorAll('[data-delstudent]').forEach(el => el.addEventListener('click', async () => { await deleteStudent(el.dataset.delstudent); }));
@@ -658,7 +724,43 @@ function attachHandlers() {
     await addGrade(state.modal.studentId, subject, value);
     state.modal = null; render();
   });
+
+  /* Fayldan (Excel/CSV/Word) ommaviy o'quvchi import qilish */
+  document.getElementById('bulkFileDropZone')?.addEventListener('click', () => document.getElementById('bulkFileInput').click());
+  document.getElementById('bulkFileInput')?.addEventListener('change', async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const zone = document.getElementById('bulkFileDropZone');
+    zone.textContent = '\u23F3 Fayl o\u2019qilmoqda...';
+    try {
+      const names = await parseRosterFile(file);
+      document.getElementById('bulkNamesArea').value = names.join('\n');
+      zone.textContent = names.length
+        ? `\u2705 ${names.length} ta ism topildi \u2014 pastda tekshirib, kerak bo'lsa tahrirlang`
+        : '\u26A0\uFE0F Ism topilmadi, pastga qo\u2019lda kiriting';
+    } catch (err) {
+      toast('Faylni o\u2019qib bo\u2019lmadi: ' + (err.message || ''), 'error');
+      zone.textContent = '\u{1F4E4} Faylni tanlash uchun bosing';
+    }
+  });
+  document.getElementById('bulkSave')?.addEventListener('click', async () => {
+    const cls = document.getElementById('bulkClass').value.trim();
+    const raw = document.getElementById('bulkNamesArea').value;
+    const names = raw.split('\n').map(s => s.trim()).filter(Boolean);
+    if (!names.length) { toast('Kamida bitta ism kiriting.', 'error'); return; }
+    const btn = document.getElementById('bulkSave'); btn.disabled = true; btn.textContent = 'Qo\u2019shilmoqda...';
+    try {
+      for (const name of names) {
+        await addStudent(state.firebaseUser.uid, state.activeGroupId, { fullName: name, className: cls });
+      }
+      toast(`${names.length} ta o'quvchi qo'shildi.`, 'info');
+      state.modal = null; render();
+    } catch (err) {
+      toast(friendlyError(err), 'error');
+      btn.disabled = false; btn.textContent = 'Barchasini qo\u2019shish';
+    }
+  });
 }
+
 
 function startLockCountdownIfNeeded() {
   const el = document.getElementById('lockCountdown');
