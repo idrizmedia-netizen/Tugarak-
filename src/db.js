@@ -57,6 +57,17 @@ export async function addGrade(studentId, subject, value) {
   });
 }
 
+/* ---------- bildirishnomalar (admin -> hammaga) ---------- */
+export function watchNotifications(callback) {
+  const q = query(collection(db, 'notifications'), orderBy('createdAt', 'desc'));
+  return onSnapshot(q, snap => {
+    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  });
+}
+export async function createNotification(title, message) {
+  await addDoc(collection(db, 'notifications'), { title, message, createdAt: serverTimestamp() });
+}
+
 /* ---------- admin bootstrap helper (run once manually, see README) ---------- */
 export async function grantAdmin(uid) {
   const { setDoc } = await import('firebase/firestore');
