@@ -58,6 +58,8 @@ export async function loginTeacher(email, password) {
 
 export async function loginWithGoogle() {
   const cred = await signInWithPopup(auth, googleProvider);
+  const admin = await isAdmin(cred.user.uid, cred.user.email);
+  if (admin) return cred.user; // adminlar uchun o'qituvchi hujjati yaratilmaydi
   const ref = doc(db, 'users', cred.user.uid);
   const snap = await getDoc(ref);
   if (!snap.exists()) {
