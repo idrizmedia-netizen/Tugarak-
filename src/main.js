@@ -41,7 +41,10 @@ const CONTRACT_TEXT = `
 <p>3. Ma'muriyat Rahbar tomonidan yuborilgan ro'yxatdan o'tish arizasini ko'rib chiqib, tasdiqlash yoki rad etish huquqiga ega.</p>
 <p>4. Tasdiqlangandan so'ng Rahbar tizimning barcha imkoniyatlaridan (guruh yaratish, o'quvchi qo'shish, baho qo'yish, hisobot olish) foydalanish huquqiga ega bo'ladi.</p>
 <p>5. Rahbar tekshiruvchi tashkilotlar tomonidan so'ralganda, o'z guruhi bo'yicha rasmiy hisobotni taqdim etishga majburdir.</p>
-<p>6. Ushbu shartnoma elektron shaklda, "Roziman" tugmasini bosish orqali imzolangan hisoblanadi.</p>
+<p>6. <b>To'lovlar bo'yicha shartlar:</b> tizimdan foydalanish Ma'muriyat belgilagan tartibda pullik xizmat hisoblanishi mumkin. To'lov summasi, muddati va usuli Ma'muriyat tomonidan Rahbarga alohida (telefon, email yoki tizim orqali) xabar qilinadi. Rahbar belgilangan to'lov shartlariga to'liq va o'z vaqtida rioya qilishga majburdir. To'lov amalga oshirilmagan yoki kechiktirilgan taqdirda Ma'muriyat Rahbarning hisobini vaqtincha to'xtatib qo'yish huquqiga ega.</p>
+<p>7. Ushbu shartnoma elektron shaklda, "Roziman" tugmasini bosish orqali imzolangan hisoblanadi.</p>
+<p>8. <b>Aloqa va murojaat:</b> savol, taklif yoki shikoyatlar bo'yicha Ma'muriyat bilan quyidagi manzillar orqali bog'lanish mumkin:</p>
+<p style="margin-left:6px;">\u{1F4E7} Email: idrizmedia@gmail.com<br>\u{1F4F7} Instagram: @normurodov_izzatillo<br>\u2708\uFE0F Telegram: @ziyomap</p>
 `;
 
 let state = {
@@ -49,6 +52,12 @@ let state = {
   firebaseUser: null, role: null, userDoc: null,
   teachers: [], groups: [], students: [], activeGroupId: null,
   modal: null, toast: null, pendingRegisterContract: false, authEmailTry: '',
+  // Forma qiymatlari alohida saqlanadi, shunda modal ochilib-yopilganda
+  // yoki boshqa sabab bilan sahifa qayta chizilganda (masalan, xato parol
+  // taymeri) foydalanuvchi yozgan matn o'chib ketmaydi.
+  regForm: { name: '', email: '', phone: '', password: '' },
+  loginForm: { email: '', password: '' },
+  contractReturnView: null,
 };
 
 let unsubTeachers = null, unsubGroups = null, unsubStudents = null;
@@ -87,7 +96,7 @@ watchAuth(async (user) => {
 
   if (!user) {
     state.role = null; state.userDoc = null;
-    const publicViews = ['landing', 'teacherAuth', 'adminAuth'];
+    const publicViews = ['landing', 'teacherAuth', 'adminAuth', 'contractView'];
     if (!publicViews.includes(state.view)) state.view = 'landing';
     render();
     return;
@@ -134,6 +143,12 @@ function render() {
   document.body.classList.toggle('dark', state.theme === 'dark');
 
   if (state.view === 'boot') { app.innerHTML = `<div class="spinner"></div>`; return; }
+
+  if (state.view === 'contractView') {
+    app.innerHTML = renderContractView() + renderToast();
+    attachHandlers();
+    return;
+  }
 
   if (!state.firebaseUser) {
     app.innerHTML = renderAuthGate();
@@ -191,9 +206,10 @@ function renderToast() {
 
 /* ---------- AUTH GATE ---------- */
 function renderAuthGate() {
-  if (state.view === 'teacherAuth') return `<div class="auth-wrap">${renderTeacherAuthCard()}</div>`;
-  if (state.view === 'adminAuth') return `<div class="auth-wrap">${renderAdminAuthCard()}</div>`;
-  return `<div class="auth-wrap">
+  let inner;
+  if (state.view === 'teacherAuth') inner = `<div class="auth-wrap">${renderTeacherAuthCard()}</div>`;
+  else if (state.view === 'adminAuth') inner = `<div class="auth-wrap">${renderAdminAuthCard()}</div>`;
+  else inner = `<div class="auth-wrap">
     <div class="auth-card" style="max-width:440px;">
       <div class="auth-title">${sealSVG(52)}<h1>TUGARAK<span style="color:var(--teal)">+</span></h1>
         <div class="muted">Maktabdan tashqari to'garaklarni boshqarish tizimi</div>
@@ -204,8 +220,25 @@ function renderAuthGate() {
       <div class="muted" style="text-align:center;font-size:12px;">Davlat standartidagi hisobot shakllariga mos, qulay va xavfsiz boshqaruv.</div>
     </div>
   </div>`;
+  // Modal (masalan shartnoma oynasi) va toast xabarnomasi kirishdan oldingi
+  // sahifalarda ham ko'rinishi uchun shu yerda ham qo'shiladi.
+  return `${inner}${renderModal()}${renderToast()}`;
 }
 function backToLanding() { return `<button class="link-btn" data-goto="landing" style="margin-bottom:14px;">\u2190 Bosh sahifa</button>`; }
+
+/* ---------- SHARTNOMA (alohida sahifa, modal emas) ---------- */
+function renderContractView() {
+  return `<div class="auth-wrap"><div class="auth-card" style="max-width:520px;">
+    <div style="text-align:center;margin-bottom:6px;">${sealSVG(48)}<div class="brand" style="font-size:17px;margin-top:4px;">TUGARAK<span style="color:var(--teal)">+</span></div></div>
+    <h2 style="text-align:center;margin-top:6px;">\u{1F4C4} Shartnoma</h2>
+    <div class="contract-text" style="max-height:360px;">${CONTRACT_TEXT}</div>
+    <label class="check-row"><input type="checkbox" id="contractCheck"> <span>Men shartnoma shartlari bilan tanishdim va roziman</span></label>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button type="button" class="btn btn-outline block" id="contractBackBtn">Bekor qilish</button>
+      <button type="button" class="btn btn-teal block" id="contractAcceptBtn">Roziman</button>
+    </div>
+  </div></div>`;
+}
 
 function renderTeacherAuthCard() {
   const lockInfo = getLockInfo('teacher::' + (state.authEmailTry || ''));
@@ -220,14 +253,15 @@ function renderTeacherAuthCard() {
 }
 
 function renderTeacherLoginForm(lockInfo) {
+  const f = state.loginForm;
   return `<form id="teacherLoginForm">
     <button type="button" class="btn btn-google" id="googleLoginBtn">
       <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.9 32.4 29.4 35.5 24 35.5c-6.4 0-11.5-5.1-11.5-11.5S17.6 12.5 24 12.5c2.9 0 5.6 1.1 7.6 2.9l5.7-5.7C33.9 6.5 29.2 4.5 24 4.5 13.2 4.5 4.5 13.2 4.5 24S13.2 43.5 24 43.5 43.5 34.8 43.5 24c0-1.2-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.6 18.9 12.5 24 12.5c2.9 0 5.6 1.1 7.6 2.9l5.7-5.7C33.9 6.5 29.2 4.5 24 4.5c-7.8 0-14.5 4.5-17.7 10.2z"/><path fill="#4CAF50" d="M24 43.5c5.1 0 9.8-2 13.3-5.2l-6.1-5.2c-2 1.5-4.5 2.4-7.2 2.4-5.4 0-9.9-3.1-11.3-7.6l-6.5 5C9.4 39 16.1 43.5 24 43.5z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.9 2.6-2.6 4.7-4.9 6.1l6.1 5.2C39.9 36.6 43.5 30.9 43.5 24c0-1.2-.1-2.4-.4-3.5z"/></svg>
       Google orqali kirish
     </button>
     <div class="divider"></div>
-    <label>Email</label><input type="email" id="tlEmail" required placeholder="siz@example.com">
-    <label>Parol</label><input type="password" id="tlPass" required placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022">
+    <label>Email</label><input type="email" id="tlEmail" required placeholder="siz@example.com" value="${esc(f.email)}">
+    <label>Parol</label><input type="password" id="tlPass" required placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022" value="${esc(f.password)}">
     ${lockInfo.locked ? `<div class="timer-box"><div>Ko'p marta xato parol kiritildi</div><div class="big" id="lockCountdown">${lockInfo.remaining}s</div><div class="muted">Iltimos kuting</div></div>` : ''}
     <button class="btn btn-primary block" style="margin-top:16px;" ${lockInfo.locked ? 'disabled' : ''}>Kirish</button>
     <div style="text-align:center;margin-top:12px;"><button type="button" class="link-btn" id="forgotBtn">Parolni unutdingizmi?</button></div>
@@ -235,11 +269,12 @@ function renderTeacherLoginForm(lockInfo) {
 }
 
 function renderTeacherRegisterForm() {
+  const f = state.regForm;
   return `<form id="teacherRegForm">
-    <label>To'liq ism-familiya</label><input type="text" id="rName" required placeholder="Masalan: Aliyev Vali">
-    <label>Email</label><input type="email" id="rEmail" required placeholder="siz@example.com">
-    <label>Telefon</label><input type="tel" id="rPhone" required placeholder="+998 90 123 45 67">
-    <label>Parol</label><input type="password" id="rPass" required minlength="6" placeholder="Kamida 6 belgi">
+    <label>To'liq ism-familiya</label><input type="text" id="rName" required placeholder="Masalan: Aliyev Vali" value="${esc(f.name)}">
+    <label>Email</label><input type="email" id="rEmail" required placeholder="siz@example.com" value="${esc(f.email)}">
+    <label>Telefon</label><input type="tel" id="rPhone" required placeholder="+998 90 123 45 67" value="${esc(f.phone)}">
+    <label>Parol</label><input type="password" id="rPass" required minlength="6" placeholder="Kamida 6 belgi" value="${esc(f.password)}">
     <div class="divider"></div>
     <div class="muted" style="margin-bottom:8px;">Ro'yxatdan o'tish uchun shartnoma bilan tanishib chiqishingiz kerak.</div>
     <button type="button" class="btn btn-outline block" id="openContractBtn">\u{1F4C4} Shartnomani ko'rish va tasdiqlash</button>
@@ -249,16 +284,13 @@ function renderTeacherRegisterForm() {
 }
 
 function renderAdminAuthCard() {
-  const lockInfo = getLockInfo('admin::' + (state.authEmailTry || ''));
   return `<div class="auth-card">${backToLanding()}
-    <div class="auth-title">${sealSVG(46)}<h1>Administrator</h1><div class="muted">Tizim boshqaruvi paneliga kirish</div></div>
-    <form id="adminLoginForm">
-      <label>Email</label><input type="email" id="aEmail" required placeholder="admin@sizningmaktab.uz">
-      <label>Parol</label><input type="password" id="aPass" required placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022">
-      ${lockInfo.locked ? `<div class="timer-box"><div>Ko'p marta xato parol kiritildi</div><div class="big" id="lockCountdown">${lockInfo.remaining}s</div></div>` : ''}
-      <button class="btn btn-primary block" style="margin-top:16px;" ${lockInfo.locked ? 'disabled' : ''}>Kirish</button>
-    </form>
-    <div class="muted" style="margin-top:14px;font-size:11.5px;text-align:center;">Admin hisobi Firebase konsolida yaratiladi — README'ga qarang.</div>
+    <div class="auth-title">${sealSVG(46)}<h1>Administrator</h1><div class="muted">Faqat ro'yxatga olingan Google hisobi orqali kirish mumkin</div></div>
+    <button type="button" class="btn btn-google" id="adminGoogleLoginBtn">
+      <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.9 32.4 29.4 35.5 24 35.5c-6.4 0-11.5-5.1-11.5-11.5S17.6 12.5 24 12.5c2.9 0 5.6 1.1 7.6 2.9l5.7-5.7C33.9 6.5 29.2 4.5 24 4.5 13.2 4.5 4.5 13.2 4.5 24S13.2 43.5 24 43.5 43.5 34.8 43.5 24c0-1.2-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.6 18.9 12.5 24 12.5c2.9 0 5.6 1.1 7.6 2.9l5.7-5.7C33.9 6.5 29.2 4.5 24 4.5c-7.8 0-14.5 4.5-17.7 10.2z"/><path fill="#4CAF50" d="M24 43.5c5.1 0 9.8-2 13.3-5.2l-6.1-5.2c-2 1.5-4.5 2.4-7.2 2.4-5.4 0-9.9-3.1-11.3-7.6l-6.5 5C9.4 39 16.1 43.5 24 43.5z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.9 2.6-2.6 4.7-4.9 6.1l6.1 5.2C39.9 36.6 43.5 30.9 43.5 24c0-1.2-.1-2.4-.4-3.5z"/></svg>
+      Google orqali kirish
+    </button>
+    <div class="muted" style="margin-top:14px;font-size:11.5px;text-align:center;">Faqat administrator sifatida oldindan ro'yxatga olingan (Firestore admins/{uid}) Google hisoblar kira oladi.</div>
   </div>`;
 }
 
@@ -267,14 +299,14 @@ function renderGoogleCompleteScreen() {
     <div class="auth-title">${sealSVG(46)}<h1>Ro'yxatdan o'tishni yakunlang</h1>
       <div class="muted">${esc(state.firebaseUser?.email || '')}</div></div>
     <form id="googleCompleteForm">
-      <label>Telefon raqamingiz</label><input type="tel" id="gcPhone" required placeholder="+998 90 123 45 67">
+      <label>Telefon raqamingiz</label><input type="tel" id="gcPhone" required placeholder="+998 90 123 45 67" value="${esc(state.regForm.phone)}">
       <div class="divider"></div>
       <div class="muted" style="margin-bottom:8px;">Davom etish uchun shartnoma bilan tanishib chiqing.</div>
       <button type="button" class="btn btn-outline block" id="openContractBtn">\u{1F4C4} Shartnomani ko'rish va tasdiqlash</button>
       <div class="muted" style="margin-top:8px;">${state.pendingRegisterContract ? '\u2705 Shartnoma qabul qilindi' : 'Shartnoma hali qabul qilinmagan'}</div>
       <button class="btn btn-primary block" style="margin-top:16px;" ${state.pendingRegisterContract ? '' : 'disabled'}>Arizani yuborish</button>
     </form>
-  </div></div>`;
+  </div></div>${renderModal()}${renderToast()}`;
 }
 
 /* ---------- TEACHER PENDING ---------- */
@@ -398,15 +430,6 @@ function renderGroupPanel(group) {
 function renderModal() {
   if (!state.modal) return '';
   const m = state.modal;
-  if (m.type === 'contract') {
-    return `<div class="modal-bg" id="modalBg"><div class="modal">
-      <h2>\u{1F4C4} Shartnoma</h2><div class="contract-text">${CONTRACT_TEXT}</div>
-      <label class="check-row"><input type="checkbox" id="contractCheck"> <span>Men shartnoma shartlari bilan tanishdim va roziman</span></label>
-      <div style="display:flex;gap:10px;margin-top:18px;">
-        <button class="btn btn-outline block" id="modalCancel">Bekor qilish</button>
-        <button class="btn btn-teal block" id="modalAccept">Roziman</button>
-      </div></div></div>`;
-  }
   if (m.type === 'newGroup') {
     return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:420px;">
       <h2>Yangi guruh</h2>
@@ -470,6 +493,17 @@ function attachHandlers() {
   document.querySelectorAll('[data-goto]').forEach(el => el.addEventListener('click', () => { state.view = el.dataset.goto; render(); }));
   document.querySelectorAll('[data-tab]').forEach(el => el.addEventListener('click', () => { state.authTab = el.dataset.tab; render(); }));
 
+  /* Forma maydonlari: har bir harf kiritilganda state'ga yozib boriladi
+     (render() chaqirilmaydi) — shunda modal ochilishi yoki taymer kabi
+     boshqa sabab bilan sahifa qayta chizilsa ham, yozilgan matn saqlanib qoladi. */
+  document.getElementById('rName')?.addEventListener('input', e => state.regForm.name = e.target.value);
+  document.getElementById('rEmail')?.addEventListener('input', e => state.regForm.email = e.target.value);
+  document.getElementById('rPhone')?.addEventListener('input', e => state.regForm.phone = e.target.value);
+  document.getElementById('rPass')?.addEventListener('input', e => state.regForm.password = e.target.value);
+  document.getElementById('tlEmail')?.addEventListener('input', e => state.loginForm.email = e.target.value);
+  document.getElementById('tlPass')?.addEventListener('input', e => state.loginForm.password = e.target.value);
+  document.getElementById('gcPhone')?.addEventListener('input', e => state.regForm.phone = e.target.value);
+
   /* Teacher login */
   document.getElementById('teacherLoginForm')?.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -481,6 +515,7 @@ function attachHandlers() {
     try {
       await loginTeacher(email, pass);
       clearFails(lockKey);
+      state.loginForm = { email: '', password: '' };
     } catch (err) {
       const count = registerFail(lockKey);
       toast(`${friendlyError(err)} (urinish: ${count}/3)`, 'error');
@@ -501,7 +536,21 @@ function attachHandlers() {
   });
 
   /* Teacher register */
-  document.getElementById('openContractBtn')?.addEventListener('click', () => { state.modal = { type: 'contract' }; render(); });
+  document.getElementById('openContractBtn')?.addEventListener('click', () => {
+    state.contractReturnView = state.view;
+    state.view = 'contractView';
+    render();
+  });
+  document.getElementById('contractBackBtn')?.addEventListener('click', () => {
+    state.view = state.contractReturnView || 'teacherAuth';
+    render();
+  });
+  document.getElementById('contractAcceptBtn')?.addEventListener('click', () => {
+    if (!document.getElementById('contractCheck').checked) { toast('Iltimos, avval belgini bosing.', 'error'); return; }
+    state.pendingRegisterContract = true;
+    state.view = state.contractReturnView || 'teacherAuth';
+    render();
+  });
   document.getElementById('teacherRegForm')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!state.pendingRegisterContract) { toast('Avval shartnomani tasdiqlang.', 'error'); return; }
@@ -512,6 +561,7 @@ function attachHandlers() {
     try {
       await registerTeacher({ fullName, email, phone, password });
       state.pendingRegisterContract = false;
+      state.regForm = { name: '', email: '', phone: '', password: '' };
       toast('Ariza yuborildi! Administrator tasdiqlashini kuting.', 'info');
     } catch (err) { toast(friendlyError(err), 'error'); }
   });
@@ -531,22 +581,10 @@ function attachHandlers() {
     } catch (err) { toast(friendlyError(err), 'error'); }
   });
 
-  /* Admin login */
-  document.getElementById('adminLoginForm')?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const email = document.getElementById('aEmail').value.trim();
-    const pass = document.getElementById('aPass').value;
-    state.authEmailTry = email;
-    const lockKey = 'admin::' + email;
-    if (getLockInfo(lockKey).locked) { toast('Hisob vaqtincha bloklangan.', 'error'); return; }
-    try {
-      await loginTeacher(email, pass); // same Firebase Auth sign-in; role resolved by admins/{uid} doc
-      clearFails(lockKey);
-    } catch (err) {
-      const count = registerFail(lockKey);
-      toast(`${friendlyError(err)} (urinish: ${count}/3)`, 'error');
-      render(); startLockCountdownIfNeeded();
-    }
+  /* Admin login \u2014 faqat Google */
+  document.getElementById('adminGoogleLoginBtn')?.addEventListener('click', async () => {
+    try { await loginWithGoogle(); }
+    catch (err) { toast(friendlyError(err), 'error'); }
   });
 
   /* Admin actions */
@@ -571,10 +609,6 @@ function attachHandlers() {
   /* Modal generic */
   document.getElementById('modalCancel')?.addEventListener('click', () => { state.modal = null; render(); });
   document.getElementById('modalBg')?.addEventListener('click', (e) => { if (e.target.id === 'modalBg') { state.modal = null; render(); } });
-  document.getElementById('modalAccept')?.addEventListener('click', () => {
-    if (!document.getElementById('contractCheck').checked) { toast('Iltimos, avval belgini bosing.', 'error'); return; }
-    state.pendingRegisterContract = true; state.modal = null; render();
-  });
 
   document.getElementById('ngSave')?.addEventListener('click', async () => {
     const name = document.getElementById('ngName').value.trim();
