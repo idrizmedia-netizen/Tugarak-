@@ -6,10 +6,14 @@ import {
 import {
   watchAllTeachers, setTeacherStatus, watchMyGroups, createGroup,
   watchGroupStudents, addStudent, deleteStudent, addGrade,
-  watchNotifications, createNotification
+  watchNotifications, createNotification,
+  rejectTeacher, resubmitApplication, updateTeacherProfile,
+  watchSubscriptionSettings, saveSubscriptionSettings, chooseSubscriptionPlan
 } from './db.js';
 import { auth } from './firebase.js';
-import { parseRosterFile } from './importParsers.js';
+import { parseRosterFile } from './importparsers.js';
+import { t, LANGS, getLang, setLang, contractText } from './i18n.js';
+import * as XLSX from 'xlsx';
 
 /** Rasmni kichraytirib, siqilgan base64 (JPEG) shaklga o'giradi.
  *  Firebase Storage o'rniga to'g'ridan-to'g'ri Firestore'da saqlash uchun
@@ -35,19 +39,7 @@ function fileToCompressedBase64(file, maxWidth = 480, quality = 0.6) {
   });
 }
 
-const CONTRACT_TEXT = `
-<p><b>TO'GARAK RAHBARI BILAN TUZILADIGAN SHARTNOMA (namuna)</b></p>
-<p>Ushbu shartnoma "TUGARAK+" tizimi ma'muriyati (keyingi o'rinlarda — "Ma'muriyat") va to'garak rahbari sifatida ro'yxatdan o'tayotgan shaxs (keyingi o'rinlarda — "Rahbar") o'rtasida tuziladi.</p>
-<p>1. Rahbar tizimga kiritilgan o'quvchilar ro'yxati va baholash ma'lumotlarining to'g'riligiga shaxsan javobgardir.</p>
-<p>2. Rahbar o'quvchilarning shaxsiy ma'lumotlarini (jumladan, qo'lda yozilgan ro'yxatlar rasmini) faqat ta'lim maqsadlarida ishlatishga majburdir.</p>
-<p>3. Ma'muriyat Rahbar tomonidan yuborilgan ro'yxatdan o'tish arizasini ko'rib chiqib, tasdiqlash yoki rad etish huquqiga ega.</p>
-<p>4. Tasdiqlangandan so'ng Rahbar tizimning barcha imkoniyatlaridan (guruh yaratish, o'quvchi qo'shish, baho qo'yish, hisobot olish) foydalanish huquqiga ega bo'ladi.</p>
-<p>5. Rahbar tekshiruvchi tashkilotlar tomonidan so'ralganda, o'z guruhi bo'yicha rasmiy hisobotni taqdim etishga majburdir.</p>
-<p>6. <b>To'lovlar bo'yicha shartlar:</b> tizimdan foydalanish Ma'muriyat belgilagan tartibda pullik xizmat hisoblanishi mumkin. To'lov summasi, muddati va usuli Ma'muriyat tomonidan Rahbarga alohida (telefon, email yoki tizim orqali) xabar qilinadi. Rahbar belgilangan to'lov shartlariga to'liq va o'z vaqtida rioya qilishga majburdir. To'lov amalga oshirilmagan yoki kechiktirilgan taqdirda Ma'muriyat Rahbarning hisobini vaqtincha to'xtatib qo'yish huquqiga ega.</p>
-<p>7. Ushbu shartnoma elektron shaklda, "Roziman" tugmasini bosish orqali imzolangan hisoblanadi.</p>
-<p>8. <b>Aloqa va murojaat:</b> savol, taklif yoki shikoyatlar bo'yicha Ma'muriyat bilan quyidagi manzillar orqali bog'lanish mumkin:</p>
-<p style="margin-left:6px;">\u{1F4E7} Email: idrizmedia@gmail.com<br>\u{1F4F7} Instagram: @normurodov_izzatillo<br>\u2708\uFE0F Telegram: @ziyomap</p>
-`;
+
 
 let state = {
   view: 'boot', authTab: 'login', theme: localStorage.getItem('theme') || 'light',
@@ -61,9 +53,11 @@ let state = {
   loginForm: { email: '', password: '' },
   contractReturnView: null,
   notifications: [],
+  subscription: { enabled: false, plans: { free: { price: 0, discount: 0, features: [] }, monthly: { price: 0, discount: 0, features: [] }, yearly: { price: 0, discount: 0, features: [] } } },
+  profileForm: { name: '', phone: '' },
 };
 
-let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null;
+let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null;
 const uid = () => 'x' + Math.random().toString(36).slice(2, 9);
 
 function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -71,16 +65,16 @@ function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({ '&': '
 function friendlyError(err) {
   const code = err?.code || '';
   const map = {
-    'auth/user-not-found': 'Bunday foydalanuvchi topilmadi.',
-    'auth/wrong-password': 'Parol xato.',
-    'auth/invalid-credential': 'Email yoki parol xato.',
-    'auth/email-already-in-use': 'Bu email allaqachon ro\u2019yxatdan o\u2019tgan.',
-    'auth/weak-password': 'Parol juda oddiy, kamida 6 belgi kiriting.',
-    'auth/invalid-email': 'Email manzili noto\u2019g\u2019ri.',
-    'auth/too-many-requests': 'Juda ko\u2019p urinish. Birozdan so\u2019ng qayta urinib ko\u2019ring.',
-    'auth/popup-closed-by-user': 'Google oynasi yopildi, qayta urinib ko\u2019ring.'
+    'auth/user-not-found': t('errUserNotFound'),
+    'auth/wrong-password': t('errWrongPassword'),
+    'auth/invalid-credential': t('errInvalidCredential'),
+    'auth/email-already-in-use': t('errEmailInUse'),
+    'auth/weak-password': t('errWeakPassword'),
+    'auth/invalid-email': t('errInvalidEmail'),
+    'auth/too-many-requests': t('errTooMany'),
+    'auth/popup-closed-by-user': t('errPopupClosed')
   };
-  return map[code] || (err?.message || 'Xatolik yuz berdi.');
+  return map[code] || (err?.message || t('errGeneric'));
 }
 
 function toast(msg, kind) {
@@ -97,6 +91,7 @@ watchAuth(async (user) => {
   if (unsubGroups) { unsubGroups(); unsubGroups = null; }
   if (unsubStudents) { unsubStudents(); unsubStudents = null; }
   if (unsubNotifications) { unsubNotifications(); unsubNotifications = null; }
+  if (unsubSubscription) { unsubSubscription(); unsubSubscription = null; }
 
   if (!user) {
     state.role = null; state.userDoc = null; state.notifications = [];
@@ -107,8 +102,9 @@ watchAuth(async (user) => {
   }
 
   // Tizimga kirgan har qanday foydalanuvchi (admin yoki o'qituvchi)
-  // bildirishnomalarni ko'ra oladi.
+  // bildirishnomalarni va obuna sozlamalarini ko'ra oladi.
   unsubNotifications = watchNotifications(list => { state.notifications = list; render(); });
+  unsubSubscription = watchSubscriptionSettings(sub => { state.subscription = sub; render(); });
 
   const admin = await isAdmin(user.uid, user.email);
   if (admin) {
@@ -125,7 +121,7 @@ watchAuth(async (user) => {
   if (!udoc) { state.view = 'teacherAuth'; render(); return; }
   if (udoc.status === 'incomplete') { state.view = 'googleComplete'; render(); return; }
   if (udoc.status === 'approved') {
-    state.view = 'teacherDash';
+    if (state.view !== 'subscription') state.view = 'teacherDash';
     unsubGroups = watchMyGroups(user.uid, list => {
       state.groups = list;
       if (!state.activeGroupId && list.length) state.activeGroupId = list[0].id;
@@ -161,15 +157,25 @@ function render() {
   if (!state.firebaseUser) {
     app.innerHTML = renderAuthGate();
   } else if (state.role === 'admin') {
-    app.innerHTML = renderShell(renderAdminDash());
+    app.innerHTML = renderShell(renderAdminDash(), 'adminDash');
   } else if (state.view === 'googleComplete') {
     app.innerHTML = renderGoogleCompleteScreen();
   } else if (state.view === 'teacherPending' || (state.userDoc && state.userDoc.status !== 'approved')) {
-    app.innerHTML = renderShell(renderTeacherPending());
+    app.innerHTML = renderShell(renderTeacherPending(), 'teacherDash');
+  } else if (state.view === 'subscription') {
+    app.innerHTML = renderShell(renderSubscriptionView(), 'subscription');
   } else {
-    app.innerHTML = renderShell(renderTeacherDash());
+    app.innerHTML = renderShell(renderTeacherDash(), 'teacherDash');
   }
   attachHandlers();
+}
+
+function langSwitcherHTML(fixed) {
+  const cur = getLang();
+  const btns = LANGS.map(l => `<button data-lang="${l.code}" style="border:none;background:${l.code === cur ? 'var(--teal)' : 'transparent'};color:${l.code === cur ? '#fff' : 'var(--ink-soft)'};font-size:11px;font-weight:700;padding:4px 8px;border-radius:16px;cursor:pointer;">${l.code.toUpperCase()}</button>`).join('');
+  const wrap = `<div style="display:flex;gap:2px;background:var(--paper-2);border:1px solid var(--line);border-radius:20px;padding:3px;">${btns}</div>`;
+  if (!fixed) return wrap;
+  return `<div style="position:fixed;top:14px;right:14px;z-index:150;display:flex;gap:8px;align-items:center;">${wrap}<button class="theme-toggle" id="themeToggle" aria-label="Tun/kun rejimi"></button></div>`;
 }
 
 function sealSVG(size) {
@@ -188,28 +194,32 @@ function hasUnreadNotifications() {
 }
 
 function topbar() {
-  const who = state.role === 'admin' ? 'Administrator' : (state.userDoc?.fullName || state.firebaseUser?.displayName || '');
+  const who = state.role === 'admin' ? t('adminTitle') : (state.userDoc?.fullName || state.firebaseUser?.displayName || '');
   const unread = state.firebaseUser && hasUnreadNotifications();
   return `<div class="topbar">
     <div class="brandwrap">${sealSVG(34)}<div class="brand">TUGARAK<span>+</span></div></div>
     <div class="topbar-right">
+      ${langSwitcherHTML(false)}
       <button class="theme-toggle" id="themeToggle" aria-label="Tun/kun rejimi"></button>
       ${state.firebaseUser ? `<button class="logout-btn" id="notifBell" style="position:relative;font-size:16px;line-height:1;">\u{1F514}${unread ? '<span style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:var(--danger);"></span>' : ''}</button>
-      <div class="userchip"><div class="avatar-sm">${esc((who || '?').slice(0, 1).toUpperCase())}</div><span>${esc(who || '')}</span></div>
-      <button class="logout-btn" id="logoutBtn">Chiqish</button>` : ''}
+      <button class="userchip" id="profileBtn" style="border:none;background:transparent;cursor:pointer;padding:0;"><div class="avatar-sm">${esc((who || '?').slice(0, 1).toUpperCase())}</div><span>${esc(who || '')}</span></button>
+      <button class="logout-btn" id="logoutBtn">${t('logout')}</button>` : ''}
     </div>
   </div>`;
 }
 
-function renderShell(inner) {
+function renderShell(inner, activeView) {
   const role = state.role;
-  const nav = role === 'admin' ? [['adminDash', '\u{1F5C2}', 'Tasdiqlash']] : [['teacherDash', '\u{1F3E0}', 'Boshqaruv']];
+  const nav = role === 'admin'
+    ? [['adminDash', '\u{1F5C2}', t('navAdmin')]]
+    : [['teacherDash', '\u{1F3E0}', t('navTeacher')], ['subscription', '\u{1F4B3}', t('navSubscription')]];
+  const navBtn = (v, ic, l, cls) => `<button class="${v === activeView ? 'active' : ''}" data-navto="${v}">${cls === 'bottom' ? `${ic}<span>${l}</span>` : `${ic} ${l}`}</button>`;
   return `${topbar()}
   <div class="shell">
-    <div class="sidebar no-print">${nav.map(([v, ic, l]) => `<button class="active">${ic} ${l}</button>`).join('')}</div>
+    <div class="sidebar no-print">${nav.map(([v, ic, l]) => navBtn(v, ic, l)).join('')}</div>
     <div class="main">${inner}</div>
   </div>
-  <div class="bottomnav no-print">${nav.map(([v, ic, l]) => `<button class="active">${ic}<span>${l}</span></button>`).join('')}</div>
+  <div class="bottomnav no-print">${nav.map(([v, ic, l]) => navBtn(v, ic, l, 'bottom')).join('')}</div>
   ${renderModal()}${renderToast()}`;
 }
 
@@ -227,30 +237,30 @@ function renderAuthGate() {
   else inner = `<div class="auth-wrap">
     <div class="auth-card" style="max-width:440px;">
       <div class="auth-title">${sealSVG(52)}<h1>TUGARAK<span style="color:var(--teal)">+</span></h1>
-        <div class="muted">Maktabdan tashqari to'garaklarni boshqarish tizimi</div>
+        <div class="muted">${t('tagline')}</div>
       </div>
-      <button class="btn btn-teal block" data-goto="teacherAuth" style="margin-bottom:10px;">\u{1F9D1}\u200D\u{1F3EB} To'garak rahbari sifatida kirish</button>
-      <button class="btn btn-outline block" data-goto="adminAuth">\u{1F6E1} Administrator sifatida kirish</button>
+      <button class="btn btn-teal block" data-goto="teacherAuth" style="margin-bottom:10px;">\u{1F9D1}\u200D\u{1F3EB} ${t('teacherRoleBtn')}</button>
+      <button class="btn btn-outline block" data-goto="adminAuth">\u{1F6E1} ${t('adminRoleBtn')}</button>
       <div class="divider"></div>
-      <div class="muted" style="text-align:center;font-size:12px;">Davlat standartidagi hisobot shakllariga mos, qulay va xavfsiz boshqaruv.</div>
+      <div class="muted" style="text-align:center;font-size:12px;">${t('footerNote')}</div>
     </div>
   </div>`;
   // Modal (masalan shartnoma oynasi) va toast xabarnomasi kirishdan oldingi
   // sahifalarda ham ko'rinishi uchun shu yerda ham qo'shiladi.
-  return `${inner}${renderModal()}${renderToast()}`;
+  return `${langSwitcherHTML(true)}${inner}${renderModal()}${renderToast()}`;
 }
-function backToLanding() { return `<button class="link-btn" data-goto="landing" style="margin-bottom:14px;">\u2190 Bosh sahifa</button>`; }
+function backToLanding() { return `<button class="link-btn" data-goto="landing" style="margin-bottom:14px;">${t('back')}</button>`; }
 
 /* ---------- SHARTNOMA (alohida sahifa, modal emas) ---------- */
 function renderContractView() {
-  return `<div class="auth-wrap"><div class="auth-card" style="max-width:520px;">
+  return `${langSwitcherHTML(true)}<div class="auth-wrap"><div class="auth-card" style="max-width:520px;">
     <div style="text-align:center;margin-bottom:6px;">${sealSVG(48)}<div class="brand" style="font-size:17px;margin-top:4px;">TUGARAK<span style="color:var(--teal)">+</span></div></div>
-    <h2 style="text-align:center;margin-top:6px;">\u{1F4C4} Shartnoma</h2>
-    <div class="contract-text" style="max-height:360px;">${CONTRACT_TEXT}</div>
-    <label class="check-row"><input type="checkbox" id="contractCheck"> <span>Men shartnoma shartlari bilan tanishdim va roziman</span></label>
+    <h2 style="text-align:center;margin-top:6px;">${t('contractPageTitle')}</h2>
+    <div class="contract-text" style="max-height:360px;">${contractText()}</div>
+    <label class="check-row"><input type="checkbox" id="contractCheck"> <span>${t('contractCheck')}</span></label>
     <div style="display:flex;gap:10px;margin-top:18px;">
-      <button type="button" class="btn btn-outline block" id="contractBackBtn">Bekor qilish</button>
-      <button type="button" class="btn btn-teal block" id="contractAcceptBtn">Roziman</button>
+      <button type="button" class="btn btn-outline block" id="contractBackBtn">${t('cancel')}</button>
+      <button type="button" class="btn btn-teal block" id="contractAcceptBtn">${t('accept')}</button>
     </div>
   </div></div>`;
 }
@@ -258,10 +268,10 @@ function renderContractView() {
 function renderTeacherAuthCard() {
   const lockInfo = getLockInfo('teacher::' + (state.authEmailTry || ''));
   return `<div class="auth-card">${backToLanding()}
-    <div class="auth-title">${sealSVG(46)}<h1>To'garak rahbari</h1><div class="muted">Ro'yxatdan o'tish yoki tizimga kirish</div></div>
+    <div class="auth-title">${sealSVG(46)}<h1>${t('teacherTitle')}</h1><div class="muted">${t('teacherSubtitle')}</div></div>
     <div class="auth-tabs">
-      <button data-tab="login" class="${state.authTab === 'login' ? 'active' : ''}">Kirish</button>
-      <button data-tab="register" class="${state.authTab === 'register' ? 'active' : ''}">Ro'yxatdan o'tish</button>
+      <button data-tab="login" class="${state.authTab === 'login' ? 'active' : ''}">${t('tabLogin')}</button>
+      <button data-tab="register" class="${state.authTab === 'register' ? 'active' : ''}">${t('tabRegister')}</button>
     </div>
     ${state.authTab === 'login' ? renderTeacherLoginForm(lockInfo) : renderTeacherRegisterForm()}
   </div>`;
@@ -272,127 +282,258 @@ function renderTeacherLoginForm(lockInfo) {
   return `<form id="teacherLoginForm">
     <button type="button" class="btn btn-google" id="googleLoginBtn">
       <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.9 32.4 29.4 35.5 24 35.5c-6.4 0-11.5-5.1-11.5-11.5S17.6 12.5 24 12.5c2.9 0 5.6 1.1 7.6 2.9l5.7-5.7C33.9 6.5 29.2 4.5 24 4.5 13.2 4.5 4.5 13.2 4.5 24S13.2 43.5 24 43.5 43.5 34.8 43.5 24c0-1.2-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.6 18.9 12.5 24 12.5c2.9 0 5.6 1.1 7.6 2.9l5.7-5.7C33.9 6.5 29.2 4.5 24 4.5c-7.8 0-14.5 4.5-17.7 10.2z"/><path fill="#4CAF50" d="M24 43.5c5.1 0 9.8-2 13.3-5.2l-6.1-5.2c-2 1.5-4.5 2.4-7.2 2.4-5.4 0-9.9-3.1-11.3-7.6l-6.5 5C9.4 39 16.1 43.5 24 43.5z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.9 2.6-2.6 4.7-4.9 6.1l6.1 5.2C39.9 36.6 43.5 30.9 43.5 24c0-1.2-.1-2.4-.4-3.5z"/></svg>
-      Google orqali kirish
+      ${t('googleBtn')}
     </button>
     <div class="divider"></div>
-    <label>Email</label><input type="email" id="tlEmail" required placeholder="siz@example.com" value="${esc(f.email)}">
-    <label>Parol</label><input type="password" id="tlPass" required placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022" value="${esc(f.password)}">
-    ${lockInfo.locked ? `<div class="timer-box"><div>Ko'p marta xato parol kiritildi</div><div class="big" id="lockCountdown">${lockInfo.remaining}s</div><div class="muted">Iltimos kuting</div></div>` : ''}
-    <button class="btn btn-primary block" style="margin-top:16px;" ${lockInfo.locked ? 'disabled' : ''}>Kirish</button>
-    <div style="text-align:center;margin-top:12px;"><button type="button" class="link-btn" id="forgotBtn">Parolni unutdingizmi?</button></div>
+    <label>${t('emailLabel')}</label><input type="email" id="tlEmail" required placeholder="siz@example.com" value="${esc(f.email)}">
+    <label>${t('passLabel')}</label><input type="password" id="tlPass" required placeholder="${t('passPh')}" value="${esc(f.password)}">
+    ${lockInfo.locked ? `<div class="timer-box"><div>${t('lockedMsg')}</div><div class="big" id="lockCountdown">${lockInfo.remaining}s</div><div class="muted">${t('lockedWait')}</div></div>` : ''}
+    <button class="btn btn-primary block" style="margin-top:16px;" ${lockInfo.locked ? 'disabled' : ''}>${t('loginBtn')}</button>
+    <div style="text-align:center;margin-top:12px;"><button type="button" class="link-btn" id="forgotBtn">${t('forgotBtn')}</button></div>
   </form>`;
 }
 
 function renderTeacherRegisterForm() {
   const f = state.regForm;
   return `<form id="teacherRegForm">
-    <label>To'liq ism-familiya</label><input type="text" id="rName" required placeholder="Masalan: Aliyev Vali" value="${esc(f.name)}">
-    <label>Email</label><input type="email" id="rEmail" required placeholder="siz@example.com" value="${esc(f.email)}">
-    <label>Telefon</label><input type="tel" id="rPhone" required placeholder="+998 90 123 45 67" value="${esc(f.phone)}">
-    <label>Parol</label><input type="password" id="rPass" required minlength="6" placeholder="Kamida 6 belgi" value="${esc(f.password)}">
+    <label>${t('fullNameLabel')}</label><input type="text" id="rName" required placeholder="${t('fullNamePh')}" value="${esc(f.name)}">
+    <label>${t('emailLabel')}</label><input type="email" id="rEmail" required placeholder="${t('emailPh')}" value="${esc(f.email)}">
+    <label>${t('phoneLabel')}</label><input type="tel" id="rPhone" required placeholder="${t('phonePh')}" value="${esc(f.phone)}">
+    <label>${t('passLabel')}</label><input type="password" id="rPass" required minlength="6" placeholder="${t('passMinPh')}" value="${esc(f.password)}">
     <div class="divider"></div>
-    <div class="muted" style="margin-bottom:8px;">Ro'yxatdan o'tish uchun shartnoma bilan tanishib chiqishingiz kerak.</div>
-    <button type="button" class="btn btn-outline block" id="openContractBtn">\u{1F4C4} Shartnomani ko'rish va tasdiqlash</button>
-    <div id="contractStatus" class="muted" style="margin-top:8px;">${state.pendingRegisterContract ? '\u2705 Shartnoma qabul qilindi' : 'Shartnoma hali qabul qilinmagan'}</div>
-    <button class="btn btn-primary block" style="margin-top:16px;" ${state.pendingRegisterContract ? '' : 'disabled'}>Arizani yuborish</button>
+    <div class="muted" style="margin-bottom:8px;">${t('contractIntroReg')}</div>
+    <button type="button" class="btn btn-outline block" id="openContractBtn">${t('contractBtn')}</button>
+    <div id="contractStatus" class="muted" style="margin-top:8px;">${state.pendingRegisterContract ? t('contractAccepted') : t('contractNotAccepted')}</div>
+    <button class="btn btn-primary block" style="margin-top:16px;" ${state.pendingRegisterContract ? '' : 'disabled'}>${t('submitApp')}</button>
   </form>`;
 }
 
 function renderAdminAuthCard() {
   return `<div class="auth-card">${backToLanding()}
-    <div class="auth-title">${sealSVG(46)}<h1>Administrator</h1><div class="muted">Faqat ro'yxatga olingan Google hisobi orqali kirish mumkin</div></div>
+    <div class="auth-title">${sealSVG(46)}<h1>${t('adminTitle')}</h1><div class="muted">${t('adminSubtitle')}</div></div>
     <button type="button" class="btn btn-google" id="adminGoogleLoginBtn">
       <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.9 32.4 29.4 35.5 24 35.5c-6.4 0-11.5-5.1-11.5-11.5S17.6 12.5 24 12.5c2.9 0 5.6 1.1 7.6 2.9l5.7-5.7C33.9 6.5 29.2 4.5 24 4.5 13.2 4.5 4.5 13.2 4.5 24S13.2 43.5 24 43.5 43.5 34.8 43.5 24c0-1.2-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.6 18.9 12.5 24 12.5c2.9 0 5.6 1.1 7.6 2.9l5.7-5.7C33.9 6.5 29.2 4.5 24 4.5c-7.8 0-14.5 4.5-17.7 10.2z"/><path fill="#4CAF50" d="M24 43.5c5.1 0 9.8-2 13.3-5.2l-6.1-5.2c-2 1.5-4.5 2.4-7.2 2.4-5.4 0-9.9-3.1-11.3-7.6l-6.5 5C9.4 39 16.1 43.5 24 43.5z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.9 2.6-2.6 4.7-4.9 6.1l6.1 5.2C39.9 36.6 43.5 30.9 43.5 24c0-1.2-.1-2.4-.4-3.5z"/></svg>
-      Google orqali kirish
+      ${t('googleBtn')}
     </button>
-    <div class="muted" style="margin-top:14px;font-size:11.5px;text-align:center;">Faqat administrator sifatida oldindan ro'yxatga olingan (Firestore admins/{uid}) Google hisoblar kira oladi.</div>
+    <div class="muted" style="margin-top:14px;font-size:11.5px;text-align:center;">${t('adminNote')}</div>
   </div>`;
 }
 
 function renderGoogleCompleteScreen() {
-  return `<div class="auth-wrap"><div class="auth-card">
-    <div class="auth-title">${sealSVG(46)}<h1>Ro'yxatdan o'tishni yakunlang</h1>
+  return `${langSwitcherHTML(true)}<div class="auth-wrap"><div class="auth-card">
+    <div class="auth-title">${sealSVG(46)}<h1>${t('gcTitle')}</h1>
       <div class="muted">${esc(state.firebaseUser?.email || '')}</div></div>
     <form id="googleCompleteForm">
-      <label>Telefon raqamingiz</label><input type="tel" id="gcPhone" required placeholder="+998 90 123 45 67" value="${esc(state.regForm.phone)}">
+      <label>${t('gcPhoneLabel')}</label><input type="tel" id="gcPhone" required placeholder="${t('phonePh')}" value="${esc(state.regForm.phone)}">
       <div class="divider"></div>
-      <div class="muted" style="margin-bottom:8px;">Davom etish uchun shartnoma bilan tanishib chiqing.</div>
-      <button type="button" class="btn btn-outline block" id="openContractBtn">\u{1F4C4} Shartnomani ko'rish va tasdiqlash</button>
-      <div class="muted" style="margin-top:8px;">${state.pendingRegisterContract ? '\u2705 Shartnoma qabul qilindi' : 'Shartnoma hali qabul qilinmagan'}</div>
-      <button class="btn btn-primary block" style="margin-top:16px;" ${state.pendingRegisterContract ? '' : 'disabled'}>Arizani yuborish</button>
+      <div class="muted" style="margin-bottom:8px;">${t('gcContractIntro')}</div>
+      <button type="button" class="btn btn-outline block" id="openContractBtn">${t('contractBtn')}</button>
+      <div class="muted" style="margin-top:8px;">${state.pendingRegisterContract ? t('contractAccepted') : t('contractNotAccepted')}</div>
+      <button class="btn btn-primary block" style="margin-top:16px;" ${state.pendingRegisterContract ? '' : 'disabled'}>${t('submitApp')}</button>
     </form>
   </div></div>${renderModal()}${renderToast()}`;
 }
 
 /* ---------- TEACHER PENDING ---------- */
 function renderTeacherPending() {
-  const t = state.userDoc;
-  if (t?.status === 'rejected') {
-    return `<div class="card"><h2>Ariza rad etildi</h2>
-      <div class="error-box">Afsuski, administrator sizning ro'yxatdan o'tish arizangizni rad etdi. Qo'shimcha ma'lumot uchun administratsiya bilan bog'laning.</div></div>`;
+  const ud = state.userDoc;
+  if (ud?.status === 'rejected') {
+    return `<div class="card"><h2>${t('rejectedTitle')}</h2>
+      <div class="error-box">${t('rejectedMsg')}</div>
+      ${ud.rejectionReason ? `<div class="error-box" style="margin-top:10px;"><b>${t('rejectionReasonShown')}</b> ${esc(ud.rejectionReason)}</div>` : ''}
+      <button class="btn btn-teal" id="openResubmitBtn" style="margin-top:16px;">${t('resubmitBtn')}</button>
+    </div>`;
   }
-  return `<div class="card"><h2>Tasdiqlanishini kutmoqda \u23F3</h2>
-    <p class="muted">Hurmatli ${esc(t?.fullName || '')}, sizning arizangiz va shartnomangiz administrator ko'rib chiqishini kutmoqda.</p>
-    <div class="pill pending">\u23F3 Kutilmoqda</div></div>`;
+  return `<div class="card"><h2>${t('pendingTitle')}</h2>
+    <p class="muted">${t('pendingMsg', { name: esc(ud?.fullName || '') })}</p>
+    ${ud?.resubmitReason ? `<div class="info-box" style="margin-top:10px;">\u{1F504} ${esc(ud.resubmitReason)}</div>` : ''}
+    <div class="pill pending">${t('pendingPill')}</div></div>`;
 }
 
 /* ---------- ADMIN DASHBOARD ---------- */
+function monthKey(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+function monthShortLabel(key) {
+  const [y, m] = key.split('-');
+  const names = { uz: ['Yan', 'Fev', 'Mar', 'Apr', 'May', 'Iyun', 'Iyul', 'Avg', 'Sen', 'Okt', 'Noy', 'Dek'],
+    ru: ['\u042f\u043d\u0432', '\u0424\u0435\u0432', '\u041c\u0430\u0440', '\u0410\u043f\u0440', '\u041c\u0430\u0439', '\u0418\u044e\u043d', '\u0418\u044e\u043b', '\u0410\u0432\u0433', '\u0421\u0435\u043d', '\u041e\u043a\u0442', '\u041d\u043e\u044f', '\u0414\u0435\u043a'],
+    en: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] };
+  const arr = names[getLang()] || names.uz;
+  return `${arr[parseInt(m) - 1]} ${y}`;
+}
 function renderAdminDash() {
-  const pending = state.teachers.filter(t => t.status === 'pending');
-  const approved = state.teachers.filter(t => t.status === 'approved');
-  const rejected = state.teachers.filter(t => t.status === 'rejected');
+  const pending = state.teachers.filter(tc => tc.status === 'pending');
+  const approved = state.teachers.filter(tc => tc.status === 'approved');
+  const rejected = state.teachers.filter(tc => tc.status === 'rejected');
+
+  // Eng faol o'qituvchilar: guruhlar soni bo'yicha reyting
+  const groupCountByTeacher = {};
+  state.groups.forEach(g => { groupCountByTeacher[g.teacherId] = (groupCountByTeacher[g.teacherId] || 0) + 1; });
+  const topTeachers = approved
+    .map(tc => ({ ...tc, groupCount: groupCountByTeacher[tc.id] || 0 }))
+    .sort((a, b) => b.groupCount - a.groupCount)
+    .slice(0, 5)
+    .filter(tc => tc.groupCount > 0);
+
+  // Oylik yangi ro'yxatdan o'tishlar (oxirgi 6 oy)
+  const monthCounts = {};
+  state.teachers.forEach(tc => {
+    if (!tc.createdAt?.toMillis) return;
+    const key = monthKey(tc.createdAt.toMillis());
+    monthCounts[key] = (monthCounts[key] || 0) + 1;
+  });
+  const monthKeys = Object.keys(monthCounts).sort().slice(-6);
+  const maxMonthCount = Math.max(1, ...monthKeys.map(k => monthCounts[k]));
+
   return `
   <div class="stat-grid" style="margin-bottom:20px;">
-    <div class="stat-card"><div class="num">${state.teachers.length}</div><div class="lbl">Jami arizalar</div></div>
-    <div class="stat-card"><div class="num">${pending.length}</div><div class="lbl">Kutilmoqda</div></div>
-    <div class="stat-card"><div class="num">${approved.length}</div><div class="lbl">Tasdiqlangan</div></div>
-    <div class="stat-card"><div class="num">${rejected.length}</div><div class="lbl">Rad etilgan</div></div>
+    <div class="stat-card"><div class="num">${state.teachers.length}</div><div class="lbl">${t('statTotal')}</div></div>
+    <div class="stat-card"><div class="num">${pending.length}</div><div class="lbl">${t('statPending')}</div></div>
+    <div class="stat-card"><div class="num">${approved.length}</div><div class="lbl">${t('statApproved')}</div></div>
+    <div class="stat-card"><div class="num">${rejected.length}</div><div class="lbl">${t('statRejected')}</div></div>
+  </div>
+
+  <div class="card">
+    <h2>${t('statsTitle')}</h2>
+    <div class="stat-grid" style="margin:14px 0;grid-template-columns:repeat(2,1fr);">
+      <div class="stat-card"><div class="num">${state.groups.length}</div><div class="lbl">${t('statsGroups')}</div></div>
+      <div class="stat-card"><div class="num">${state.students.length}</div><div class="lbl">${t('statsStudents')}</div></div>
+    </div>
+    <div class="divider"></div>
+    <h3 style="font-size:14px;margin:0 0 10px;">${t('mostActiveTitle')}</h3>
+    ${topTeachers.length === 0 ? `<div class="muted">${t('mostActiveEmpty')}</div>` :
+      topTeachers.map((tc, i) => `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--line);">
+        <span><b>${i + 1}.</b> ${esc(tc.fullName)}</span>
+        <span class="pill approved">${tc.groupCount} ${t('mostActiveGroupsSuffix')}</span>
+      </div>`).join('')}
+    <div class="divider"></div>
+    <h3 style="font-size:14px;margin:0 0 10px;">${t('monthlyRegTitle')}</h3>
+    ${monthKeys.length === 0 ? `<div class="muted">${t('mostActiveEmpty')}</div>` :
+      monthKeys.map(k => `<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+        <span class="muted" style="width:70px;font-size:12px;flex-shrink:0;">${monthShortLabel(k)}</span>
+        <div class="progress-bar" style="flex:1;"><div style="width:${monthCounts[k] / maxMonthCount * 100}%;"></div></div>
+        <span style="width:20px;font-size:12px;font-weight:700;text-align:right;">${monthCounts[k]}</span>
+      </div>`).join('')}
+  </div>
+
+  ${renderSubscriptionAdminCard()}
+
+  <div class="card">
+    <h2>${t('notifSectionTitle')}</h2>
+    <div class="muted">${t('notifSectionDesc')}</div>
+    <div class="divider"></div>
+    <label>${t('notifTitleLabel')}</label><input type="text" id="notifTitle" placeholder="${t('notifTitlePh')}">
+    <label>${t('notifMsgLabel')}</label>
+    <textarea id="notifMessage" rows="3" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:14px;font-family:inherit;" placeholder="${t('notifMsgPh')}"></textarea>
+    <button class="btn btn-teal" id="sendNotifBtn" style="margin-top:12px;">${t('notifSend')}</button>
   </div>
   <div class="card">
-    <h2>\u{1F4E2} Bildirishnoma yuborish</h2>
-    <div class="muted">Barcha tizim foydalanuvchilariga (o'qituvchilarga) bir vaqtning o'zida bildirishnoma yuboring \u2014 ular qo'ng'iroq (\u{1F514}) belgisi orqali ko'radi.</div>
+    <h2>${t('applicationsTitle')}</h2>
+    <div class="muted">${t('applicationsDesc')}</div>
     <div class="divider"></div>
-    <label>Sarlavha</label><input type="text" id="notifTitle" placeholder="Masalan: Yig'ilish haqida e'lon">
-    <label>Xabar matni</label>
-    <textarea id="notifMessage" rows="3" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:14px;font-family:inherit;" placeholder="Xabar matnini shu yerga yozing..."></textarea>
-    <button class="btn btn-teal" id="sendNotifBtn" style="margin-top:12px;">Yuborish</button>
-  </div>
-  <div class="card">
-    <h2>Tasdiqlash kutilayotgan arizalar</h2>
-    <div class="muted">Har bir o'qituvchining shartnomani qabul qilganini tekshirib, tasdiqlang yoki rad eting.</div>
-    <div class="divider"></div>
-    ${pending.length === 0 ? `<div class="empty"><div class="big-icon">\u{1F4ED}</div>Hozircha yangi ariza yo'q</div>` :
-      pending.map(t => `
+    ${pending.length === 0 ? `<div class="empty"><div class="big-icon">\u{1F4ED}</div>${t('emptyApps')}</div>` :
+      pending.map(tc => `
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;padding:12px 0;border-bottom:1px solid var(--line);">
-        <div><b>${esc(t.fullName)}</b> <span class="pill pending">\u23F3 kutilmoqda</span><br>
-        <span class="muted">${esc(t.email)} \u00B7 ${esc(t.phone || '')} \u00B7 ${t.contractAccepted ? '\u2705 Shartnoma qabul qilingan' : '\u274C Qabul qilinmagan'}</span></div>
+        <div><b>${esc(tc.fullName)}</b> <span class="pill pending">${t('pendingPill')}</span><br>
+        <span class="muted">${esc(tc.email)} \u00B7 ${esc(tc.phone || '')} \u00B7 ${tc.contractAccepted ? t('contractOk') : t('contractNo')}</span>
+        ${tc.resubmitReason ? `<div class="info-box" style="margin-top:6px;font-size:12px;">\u{1F504} ${esc(tc.resubmitReason)}</div>` : ''}
+        ${tc.proofDocs?.length ? `<div style="margin-top:6px;">${tc.proofDocs.map(p => `<img src="${p}" style="width:50px;height:50px;object-fit:cover;border-radius:6px;border:1px solid var(--line);margin-right:4px;">`).join('')}</div>` : ''}
+        </div>
         <div style="display:flex;gap:8px;">
-          <button class="btn btn-teal" data-approve="${t.id}">Tasdiqlash</button>
-          <button class="btn btn-danger" data-reject="${t.id}">Rad etish</button>
+          <button class="btn btn-teal" data-approve="${tc.id}">${t('approve')}</button>
+          <button class="btn btn-danger" data-reject="${tc.id}">${t('reject')}</button>
         </div>
       </div>`).join('')}
   </div>
   <div class="card">
-    <h2>Tasdiqlangan o'qituvchilar</h2><div class="divider"></div>
-    ${approved.length === 0 ? `<div class="empty">Hali tasdiqlangan o'qituvchi yo'q</div>` : `
-    <table><thead><tr><th>Ism</th><th>Email</th><th>Telefon</th></tr></thead><tbody>
-    ${approved.map(t => `<tr><td>${esc(t.fullName)}</td><td>${esc(t.email)}</td><td>${esc(t.phone || '')}</td></tr>`).join('')}
+    <h2>${t('approvedTitle')}</h2><div class="divider"></div>
+    ${approved.length === 0 ? `<div class="empty">${t('emptyApproved')}</div>` : `
+    <table><thead><tr><th>${t('colName')}</th><th>${t('colEmail')}</th><th>${t('colPhone')}</th></tr></thead><tbody>
+    ${approved.map(tc => `<tr><td>${esc(tc.fullName)}</td><td>${esc(tc.email)}</td><td>${esc(tc.phone || '')}</td></tr>`).join('')}
     </tbody></table>`}
   </div>
-  ${rejected.length ? `<div class="card"><h2>Rad etilganlar</h2><div class="divider"></div>
-    ${rejected.map(t => `<div class="muted" style="padding:6px 0;">${esc(t.fullName)} \u2014 ${esc(t.email)}</div>`).join('')}</div>` : ''}
+  ${rejected.length ? `<div class="card"><h2>${t('rejectedListTitle')}</h2><div class="divider"></div>
+    ${rejected.map(tc => `<div class="muted" style="padding:6px 0;">${esc(tc.fullName)} \u2014 ${esc(tc.email)}${tc.rejectionReason ? `<br><span style="color:var(--danger);font-size:12px;">${t('rejectionReasonShown')} ${esc(tc.rejectionReason)}</span>` : ''}</div>`).join('')}</div>` : ''}
   `;
+}
+
+/* ---------- OBUNA: admin boshqaruvi ---------- */
+function renderSubscriptionAdminCard() {
+  const sub = state.subscription || {};
+  const plans = sub.plans || {};
+  const planCard = (key, labelKey) => {
+    const p = plans[key] || { price: 0, discount: 0, features: [] };
+    return `<div class="card" style="margin-bottom:0;">
+      <h3 style="margin:0 0 10px;font-size:15px;">${t(labelKey)}</h3>
+      <label>${t('subPriceLabel')}</label><input type="text" inputmode="numeric" id="subPrice_${key}" value="${p.price || 0}">
+      <label>${t('subDiscountLabel')}</label><input type="text" inputmode="numeric" id="subDiscount_${key}" value="${p.discount || 0}">
+      <label>${t('subFeaturesLabel')}</label>
+      <textarea id="subFeatures_${key}" rows="4" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:13px;font-family:inherit;">${esc((p.features || []).join('\n'))}</textarea>
+    </div>`;
+  };
+  return `<div class="card">
+    <h2>${t('subAdminTitle')}</h2>
+    <div class="muted">${t('subAdminDesc')}</div>
+    <div class="divider"></div>
+    <label class="check-row" style="margin-top:0;"><input type="checkbox" id="subEnabled" ${sub.enabled ? 'checked' : ''}> <span>${t('subEnableToggle')}</span></label>
+    <div class="divider"></div>
+    <div class="plan-grid">
+      ${planCard('free', 'subFree')}
+      ${planCard('monthly', 'subMonthly')}
+      ${planCard('yearly', 'subYearly')}
+    </div>
+    <button class="btn btn-teal" id="saveSubBtn" style="margin-top:16px;">${t('subSavePlans')}</button>
+  </div>`;
+}
+
+/* ---------- OBUNA: o'qituvchi ko'rinishi ---------- */
+function renderSubscriptionView() {
+  const sub = state.subscription || {};
+  const plans = sub.plans || {};
+  const myPlan = state.userDoc?.selectedPlan;
+  const fmt = (n) => Number(n || 0).toLocaleString();
+  const planCard = (key, labelKey, priceSuffix) => {
+    const p = plans[key] || { price: 0, discount: 0, features: [] };
+    const finalPrice = p.discount ? Math.round(p.price * (1 - p.discount / 100)) : p.price;
+    const isCurrent = myPlan === key;
+    return `<div class="card" style="text-align:center;${isCurrent ? 'border-color:var(--teal);box-shadow:0 0 0 2px var(--teal);' : ''}">
+      <h3 style="margin:0 0 6px;font-size:17px;">${t(labelKey)}</h3>
+      ${p.discount ? `<div class="muted" style="text-decoration:line-through;">${fmt(p.price)}</div>` : ''}
+      <div style="font-family:'Fraunces',serif;font-size:28px;font-weight:600;color:var(--navy);margin:4px 0;">
+        ${key === 'free' ? t('subFree') : fmt(finalPrice)}
+        ${key !== 'free' ? `<span style="font-size:13px;color:var(--ink-soft);">${key === 'monthly' ? t('subPricePerMonth') : t('subPricePerYear')}</span>` : ''}
+      </div>
+      ${p.discount ? `<div class="pill approved" style="margin-bottom:10px;">-${p.discount}% ${t('subDiscount')}</div>` : '<div style="height:26px;"></div>'}
+      <ul style="text-align:left;list-style:none;padding:0;margin:12px 0;font-size:13.5px;">
+        ${(p.features || []).map(f => `<li style="padding:5px 0;border-top:1px solid var(--line);">\u2705 ${esc(f)}</li>`).join('')}
+      </ul>
+      ${isCurrent ? `<div class="pill approved">${t('subCurrent')}</div>` : `<button class="btn ${key === 'monthly' ? 'btn-teal' : 'btn-outline'} block" data-chooseplan="${key}">${t('subChoose')}</button>`}
+    </div>`;
+  };
+  return `
+  <div class="card">
+    <h2 style="margin:0;">${t('subTitle')}</h2>
+    <div class="muted">${t('subDesc')}</div>
+    ${!sub.enabled ? `<div class="info-box" style="margin-top:12px;">${t('subDisabledNote')}</div>` : ''}
+  </div>
+  <div class="plan-grid">
+    ${planCard('free', 'subFree')}
+    ${planCard('monthly', 'subMonthly', t('subPricePerMonth'))}
+    ${planCard('yearly', 'subYearly', t('subPricePerYear'))}
+  </div>`;
 }
 
 /* ---------- TEACHER DASHBOARD ---------- */
 function studentAvg(s) { if (!s.grades || !s.grades.length) return 0; return s.grades.reduce((a, g) => a + g.value, 0) / s.grades.length; }
 function gradeClass(v) { if (v >= 5) return 'g5'; if (v >= 4) return 'g4'; if (v >= 3) return 'g3'; return 'g2'; }
 function levelLabel(avg) {
-  if (avg === 0) return { t: 'Baholanmagan', c: 'var(--ink-soft)' };
-  if (avg >= 4.5) return { t: "A'lo", c: 'var(--teal)' };
-  if (avg >= 3.5) return { t: 'Yaxshi', c: '#2E6FA8' };
-  if (avg >= 3) return { t: 'Qoniqarli', c: 'var(--gold)' };
-  return { t: 'Qoniqarsiz', c: 'var(--danger)' };
+  if (avg === 0) return { label: t('levelUngraded'), c: 'var(--ink-soft)' };
+  if (avg >= 4.5) return { label: t('levelExcellent'), c: 'var(--teal)' };
+  if (avg >= 3.5) return { label: t('levelGood'), c: '#2E6FA8' };
+  if (avg >= 3) return { label: t('levelSatisfactory'), c: 'var(--gold)' };
+  return { label: t('levelUnsatisfactory'), c: 'var(--danger)' };
 }
 
 function renderTeacherDash() {
@@ -401,12 +542,12 @@ function renderTeacherDash() {
   return `
   <div class="card no-print">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-      <div><h2 style="margin:0;">Guruhlarim</h2><div class="muted">To'garak guruhini tanlang yoki yangisini yarating</div></div>
-      <button class="btn btn-teal" id="newGroupBtn">+ Yangi guruh</button>
+      <div><h2 style="margin:0;">${t('groupsTitle')}</h2><div class="muted">${t('groupsDesc')}</div></div>
+      <button class="btn btn-teal" id="newGroupBtn">${t('newGroupBtn')}</button>
     </div>
     ${myGroups.length ? `<div class="divider"></div><div style="display:flex;gap:8px;flex-wrap:wrap;">
       ${myGroups.map(g => `<button class="btn ${g.id === state.activeGroupId ? 'btn-primary' : 'btn-outline'}" data-selectgroup="${g.id}">${esc(g.name)} <span class="muted" style="opacity:.8">\u00B7 ${esc(g.subject)}</span></button>`).join('')}
-    </div>` : `<div class="empty" style="padding-top:14px;"><div class="big-icon">\u{1F4DA}</div>Hali guruh yaratilmagan</div>`}
+    </div>` : `<div class="empty" style="padding-top:14px;"><div class="big-icon">\u{1F4DA}</div>${t('emptyGroups')}</div>`}
   </div>
   ${activeGroup ? renderGroupPanel(activeGroup) : ''}
   `;
@@ -419,34 +560,36 @@ function renderGroupPanel(group) {
   return `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div><h2 style="margin:0;">${esc(group.name)}</h2><span class="tag-subject">${esc(group.subject)}</span></div>
-      <div style="display:flex;gap:8px;" class="no-print">
-        <button class="btn btn-outline" id="addManualBtn">+ Qo'lda qo'shish</button>
-        <button class="btn btn-outline" id="addPhotoBtn">\u{1F4F7} Rasmdan yuklash</button>
-        <button class="btn btn-outline" id="bulkImportBtn">\u{1F4D1} Fayldan yuklash (Excel/Word/CSV)</button>
-        <button class="btn btn-primary" id="printBtn">\u{1F5A8} Tekshiruvchi uchun eksport</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;" class="no-print">
+        <button class="btn btn-outline" id="addManualBtn">${t('addManualBtn')}</button>
+        <button class="btn btn-outline" id="addPhotoBtn">${t('addPhotoBtn')}</button>
+        <button class="btn btn-outline" id="bulkImportBtn">${t('bulkImportBtn')}</button>
+        <button class="btn btn-outline" id="quarterlyBtn">${t('quarterlyBtn')}</button>
+        <button class="btn btn-outline" id="excelExportBtn">${t('exportExcelBtn')}</button>
+        <button class="btn btn-primary" id="printBtn">${t('exportPrintBtn')}</button>
       </div>
     </div>
     <div class="divider"></div>
-    ${students.length === 0 ? `<div class="empty"><div class="big-icon">\u{1F9D2}</div>Bu guruhda hali o'quvchi yo'q.<br>Qo'lda qo'shing yoki qog'ozdagi ro'yxat rasmini yuklang.</div>` : `
-    <table><thead><tr><th>\u2116</th><th>Rasm</th><th>F.I.Sh.</th><th>Sinf</th><th>Baholar</th><th>O'rtacha</th><th>Daraja</th><th class="no-print"></th></tr></thead><tbody>
+    ${students.length === 0 ? `<div class="empty"><div class="big-icon">\u{1F9D2}</div>${t('emptyStudents')}</div>` : `
+    <table><thead><tr><th>${t('colNum')}</th><th>${t('colPhoto')}</th><th>${t('colFullName')}</th><th>${t('colClass')}</th><th>${t('colGrades')}</th><th>${t('colAvg')}</th><th>${t('colLevel')}</th><th class="no-print"></th></tr></thead><tbody>
     ${students.map((s, i) => {
       const a = studentAvg(s); const lvl = levelLabel(a);
       return `<tr>
         <td>${i + 1}</td>
         <td>${s.photo ? `<img class="student-photo" src="${s.photo}">` : '\u2014'}</td>
-        <td><b>${esc(s.fullName)}</b>${s.fromPhoto ? ` <span class="muted" style="font-size:11px;">(qo'lyozmadan)</span>` : ''}</td>
+        <td><b>${esc(s.fullName)}</b>${s.fromPhoto ? ` <span class="muted" style="font-size:11px;">${t('fromPhotoTag')}</span>` : ''}</td>
         <td>${esc(s.className || '\u2014')}</td>
-        <td>${(s.grades || []).map(g => `<span class="grade ${gradeClass(g.value)}" title="${esc(g.subject)}">${g.value}</span>`).join(' ') || '<span class="muted">\u2014</span>'}
-          <button class="link-btn no-print" data-addgrade="${s.id}" style="margin-left:6px;">+ baho</button></td>
+        <td>${(s.grades || []).map(g => `<span class="grade ${gradeClass(g.value)}" title="${esc(g.subject)}${g.period ? ' \u00B7 ' + esc(g.period) : ''}">${g.value}</span>`).join(' ') || '<span class="muted">\u2014</span>'}
+          <button class="link-btn no-print" data-addgrade="${s.id}" style="margin-left:6px;">${t('addGradeLink')}</button></td>
         <td><b>${a ? a.toFixed(2) : '\u2014'}</b></td>
-        <td><span style="color:${lvl.c};font-weight:700;">${lvl.t}</span>
+        <td><span style="color:${lvl.c};font-weight:700;">${lvl.label}</span>
           <div class="progress-bar" style="margin-top:4px;"><div style="width:${Math.min(100, a / 5 * 100)}%;"></div></div></td>
-        <td class="no-print"><button class="link-btn" data-delstudent="${s.id}" style="color:var(--danger);">O'chirish</button></td>
+        <td class="no-print"><button class="link-btn" data-delstudent="${s.id}" style="color:var(--danger);">${t('deleteLink')}</button></td>
       </tr>`;
     }).join('')}
     </tbody></table>
     <div class="divider"></div>
-    <div class="muted">Guruh o'rtacha ko'rsatkichi: <b style="color:var(--navy)">${avg.toFixed(2)}</b> / 5.00 &nbsp;\u00B7&nbsp; O'zlashtirish: <b style="color:var(--teal)">${withGrades.length ? Math.round(withGrades.filter(s => studentAvg(s) >= 3).length / withGrades.length * 100) : 0}%</b></div>
+    <div class="muted">${t('groupAvgLabel')} <b style="color:var(--navy)">${avg.toFixed(2)}</b> / 5.00 &nbsp;\u00B7&nbsp; ${t('groupProgressLabel')} <b style="color:var(--teal)">${withGrades.length ? Math.round(withGrades.filter(s => studentAvg(s) >= 3).length / withGrades.length * 100) : 0}%</b></div>
     `}
   </div>`;
 }
@@ -457,79 +600,176 @@ function renderModal() {
   const m = state.modal;
   if (m.type === 'newGroup') {
     return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:420px;">
-      <h2>Yangi guruh</h2>
-      <label>Guruh nomi</label><input type="text" id="ngName" placeholder="Masalan: Robototexnika-1">
-      <label>Fan / yo'nalish</label><input type="text" id="ngSubject" placeholder="Masalan: Robototexnika">
+      <h2>${t('mNewGroupTitle')}</h2>
+      <label>${t('mGroupNameLabel')}</label><input type="text" id="ngName" placeholder="${t('mGroupNamePh')}">
+      <label>${t('mSubjectLabel')}</label><input type="text" id="ngSubject" placeholder="${t('mSubjectPh')}">
       <div style="display:flex;gap:10px;margin-top:18px;">
-        <button class="btn btn-outline block" id="modalCancel">Bekor qilish</button>
-        <button class="btn btn-teal block" id="ngSave">Yaratish</button>
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="ngSave">${t('mCreate')}</button>
       </div></div></div>`;
   }
   if (m.type === 'addManual') {
     return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:420px;">
-      <h2>O'quvchi qo'shish</h2>
-      <label>F.I.Sh.</label><input type="text" id="amName" placeholder="Ism Familiya">
-      <label>Sinf</label><input type="text" id="amClass" placeholder="Masalan: 6-A">
+      <h2>${t('mAddStudentTitle')}</h2>
+      <label>${t('mFioLabel')}</label><input type="text" id="amName" placeholder="${t('mFioPh')}">
+      <label>${t('mClassLabel')}</label><input type="text" id="amClass" placeholder="${t('mClassPh')}">
       <div style="display:flex;gap:10px;margin-top:18px;">
-        <button class="btn btn-outline block" id="modalCancel">Bekor qilish</button>
-        <button class="btn btn-teal block" id="amSave">Qo'shish</button>
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="amSave">${t('mAdd')}</button>
       </div></div></div>`;
   }
   if (m.type === 'addPhoto') {
     return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:460px;">
-      <h2>\u{1F4F7} Qog'ozdagi ro'yxatdan yuklash</h2>
-      <div class="muted">Ruchka yoki qalamda yozilgan o'quvchilar ro'yxati rasmini yuklang, so'ng o'quvchini qo'shing.</div>
+      <h2>${t('mPhotoTitle')}</h2>
+      <div class="muted">${t('mPhotoDesc')}</div>
       <div class="upload-drop" id="photoDropZone" style="margin-top:12px;">
-        <input type="file" id="photoInput" accept="image/*" style="display:none;">\u{1F4E4} Rasmni tanlash uchun bosing
+        <input type="file" id="photoInput" accept="image/*" style="display:none;">${t('mPickPhoto')}
       </div>
       <div id="photoPreviewWrap"></div>
-      <label>O'quvchi F.I.Sh.</label><input type="text" id="apName" placeholder="Ism Familiya">
-      <label>Sinf</label><input type="text" id="apClass" placeholder="Masalan: 6-A">
+      <label>${t('mFioLabel')}</label><input type="text" id="apName" placeholder="${t('mFioPh')}">
+      <label>${t('mClassLabel')}</label><input type="text" id="apClass" placeholder="${t('mClassPh')}">
       <div style="display:flex;gap:10px;margin-top:18px;">
-        <button class="btn btn-outline block" id="modalCancel">Yopish</button>
-        <button class="btn btn-teal block" id="apSave">Qo'shish</button>
+        <button class="btn btn-outline block" id="modalCancel">${t('mClose')}</button>
+        <button class="btn btn-teal block" id="apSave">${t('mAdd')}</button>
       </div></div></div>`;
   }
   if (m.type === 'addGrade') {
     return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:380px;">
-      <h2>Baho qo'yish</h2>
-      <label>Fan</label><input type="text" id="agSubject" placeholder="Masalan: Amaliyot">
-      <label>Baho</label>
-      <select id="agValue"><option value="5">5 \u2014 A'lo</option><option value="4">4 \u2014 Yaxshi</option><option value="3">3 \u2014 Qoniqarli</option><option value="2">2 \u2014 Qoniqarsiz</option></select>
+      <h2>${t('mGradeTitle')}</h2>
+      <label>${t('mSubjectShortLabel')}</label><input type="text" id="agSubject" placeholder="${t('mSubjectShortPh')}">
+      <label>${t('mGradeLabel')}</label>
+      <select id="agValue"><option value="5">${t('gradeExcellent')}</option><option value="4">${t('gradeGood')}</option><option value="3">${t('gradeSatisfactory')}</option><option value="2">${t('gradeUnsatisfactory')}</option></select>
+      <label>${t('mPeriodLabel')}</label>
+      <select id="agPeriod">${monthOptionsHTML()}</select>
       <div style="display:flex;gap:10px;margin-top:18px;">
-        <button class="btn btn-outline block" id="modalCancel">Bekor qilish</button>
-        <button class="btn btn-teal block" id="agSave">Saqlash</button>
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="agSave">${t('mSave')}</button>
       </div></div></div>`;
   }
   if (m.type === 'bulkImport') {
     return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:520px;">
-      <h2>\u{1F4D1} Fayldan o'quvchilar ro'yxatini yuklash</h2>
-      <div class="muted">Excel (.xlsx), CSV yoki Word (.docx) faylini tanlang \u2014 o'quvchilar ismlari avtomatik aniqlanadi va pastdagi jadvalga tushadi.</div>
+      <h2>${t('mBulkTitle')}</h2>
+      <div class="muted">${t('mBulkDesc')}</div>
       <div class="upload-drop" id="bulkFileDropZone" style="margin-top:12px;">
         <input type="file" id="bulkFileInput" accept=".csv,.xlsx,.xls,.docx" style="display:none;">
-        \u{1F4E4} Faylni tanlash uchun bosing
+        ${t('mPickFile')}
       </div>
-      <label>Sinf (barcha o'quvchilar uchun, ixtiyoriy)</label><input type="text" id="bulkClass" placeholder="Masalan: 6-A">
-      <label>Aniqlangan ismlar (tekshirib, kerak bo'lsa tahrirlang \u2014 har bir qator alohida o'quvchi)</label>
-      <textarea id="bulkNamesArea" rows="8" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:13.5px;font-family:inherit;" placeholder="Fayl tanlanganda ismlar shu yerga chiqadi. Xohlasangiz, qo'lda ham yozishingiz mumkin (har qatorga bitta ism)."></textarea>
+      <label>${t('mBulkClassLabel')}</label><input type="text" id="bulkClass" placeholder="${t('mClassPh')}">
+      <label>${t('mBulkNamesLabel')}</label>
+      <textarea id="bulkNamesArea" rows="8" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:13.5px;font-family:inherit;" placeholder="${t('mBulkNamesPh')}"></textarea>
       <div style="display:flex;gap:10px;margin-top:18px;">
-        <button class="btn btn-outline block" id="modalCancel">Bekor qilish</button>
-        <button class="btn btn-teal block" id="bulkSave">Barchasini qo'shish</button>
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="bulkSave">${t('mBulkAddAll')}</button>
       </div></div></div>`;
   }
   if (m.type === 'notifications') {
     return `<div class="modal-bg" id="modalBg"><div class="modal">
-      <h2>\u{1F514} Bildirishnomalar</h2>
-      ${state.notifications.length === 0 ? `<div class="empty"><div class="big-icon">\u{1F4EC}</div>Hozircha bildirishnoma yo'q</div>` :
+      <h2>${t('mNotifTitle')}</h2>
+      ${state.notifications.length === 0 ? `<div class="empty"><div class="big-icon">\u{1F4EC}</div>${t('mNotifEmpty')}</div>` :
         state.notifications.map(n => `<div style="padding:12px 0;border-bottom:1px solid var(--line);">
           <b>${esc(n.title)}</b>
           <div class="muted" style="margin:4px 0;white-space:pre-wrap;">${esc(n.message)}</div>
-          <div class="muted" style="font-size:11px;">${n.createdAt?.toDate ? n.createdAt.toDate().toLocaleString('uz-UZ') : 'hozirgina'}</div>
+          <div class="muted" style="font-size:11px;">${n.createdAt?.toDate ? n.createdAt.toDate().toLocaleString() : t('justNow')}</div>
         </div>`).join('')}
-      <button class="btn btn-outline block" id="modalCancel" style="margin-top:16px;">Yopish</button>
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:16px;">${t('mClose')}</button>
     </div></div>`;
   }
+  if (m.type === 'quarterly') {
+    return `<div class="modal-bg" id="modalBg"><div class="modal">
+      <h2>${t('mQuarterlyTitle')}</h2>
+      ${renderQuarterlyContent(m.groupId)}
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:16px;">${t('mClose')}</button>
+    </div></div>`;
+  }
+  if (m.type === 'rejectReason') {
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:420px;">
+      <h2>${t('rejectReasonTitle')}</h2>
+      <label>${t('rejectReasonLabel')}</label>
+      <textarea id="rejectReasonArea" rows="4" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:13.5px;font-family:inherit;" placeholder="${t('rejectReasonPh')}"></textarea>
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-danger block" id="rejectConfirmBtn">${t('rejectConfirm')}</button>
+      </div></div></div>`;
+  }
+  if (m.type === 'resubmit') {
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:460px;">
+      <h2>${t('resubmitTitle')}</h2>
+      <label>${t('resubmitReasonLabel')}</label>
+      <textarea id="resubmitReasonArea" rows="3" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:13.5px;font-family:inherit;" placeholder="${t('resubmitReasonPh')}"></textarea>
+      <label>${t('resubmitProofLabel')}</label>
+      <div class="upload-drop" id="proofDropZone" style="margin-top:8px;">
+        <input type="file" id="proofInput" accept="image/*" style="display:none;">${t('mPickPhoto')}
+      </div>
+      <div id="proofPreviewWrap"></div>
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="resubmitSendBtn">${t('resubmitSend')}</button>
+      </div></div></div>`;
+  }
+  if (m.type === 'profile') {
+    const ud = state.userDoc || {};
+    const myGroups = state.groups;
+    const myStudents = state.students.filter(s => myGroups.some(g => g.id === s.groupId));
+    const avg = myStudents.length ? myStudents.reduce((a, s) => a + studentAvg(s), 0) / myStudents.length : 0;
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:440px;">
+      <h2>${t('profileTitle')}</h2>
+      <div class="stat-grid" style="margin:14px 0;">
+        <div class="stat-card"><div class="num">${myGroups.length}</div><div class="lbl">${t('profileGroups')}</div></div>
+        <div class="stat-card"><div class="num">${myStudents.length}</div><div class="lbl">${t('profileStudents')}</div></div>
+        <div class="stat-card" style="grid-column:span 2;"><div class="num">${avg.toFixed(2)}</div><div class="lbl">${t('profileAvg')}</div></div>
+      </div>
+      <div class="divider"></div>
+      <h3 style="font-size:14px;margin:0 0 6px;">${t('profileEditTitle')}</h3>
+      <label>${t('profileNameLabel')}</label><input type="text" id="profileName" value="${esc(state.profileForm.name || ud.fullName || '')}">
+      <label>${t('profilePhoneLabel')}</label><input type="tel" id="profilePhone" value="${esc(state.profileForm.phone || ud.phone || '')}">
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="profileSaveBtn">${t('profileSave')}</button>
+      </div></div></div>`;
+  }
   return '';
+}
+
+function monthOptionsHTML() {
+  const names = { uz: ['Yanvar', 'Fevral', 'Mart', 'Aprel', 'May', 'Iyun', 'Iyul', 'Avgust', 'Sentabr', 'Oktabr', 'Noyabr', 'Dekabr'],
+    ru: ['\u042f\u043d\u0432\u0430\u0440\u044c', '\u0424\u0435\u0432\u0440\u0430\u043b\u044c', '\u041c\u0430\u0440\u0442', '\u0410\u043f\u0440\u0435\u043b\u044c', '\u041c\u0430\u0439', '\u0418\u044e\u043d\u044c', '\u0418\u044e\u043b\u044c', '\u0410\u0432\u0433\u0443\u0441\u0442', '\u0421\u0435\u043d\u0442\u044f\u0431\u0440\u044c', '\u041e\u043a\u0442\u044f\u0431\u0440\u044c', '\u041d\u043e\u044f\u0431\u0440\u044c', '\u0414\u0435\u043a\u0430\u0431\u0440\u044c'],
+    en: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'] };
+  const arr = names[getLang()] || names.uz;
+  const now = new Date().getMonth();
+  return arr.map((name, i) => `<option value="${name}" ${i === now ? 'selected' : ''}>${name}</option>`).join('');
+}
+
+function quarterOfMonth(monthName) {
+  const idx = { Yanvar: 0, Fevral: 1, Mart: 2, Aprel: 3, May: 4, Iyun: 5, Iyul: 6, Avgust: 7, Sentabr: 8, Oktabr: 9, Noyabr: 10, Dekabr: 11,
+    '\u042f\u043d\u0432\u0430\u0440\u044c': 0, '\u0424\u0435\u0432\u0440\u0430\u043b\u044c': 1, '\u041c\u0430\u0440\u0442': 2, '\u0410\u043f\u0440\u0435\u043b\u044c': 3, '\u041c\u0430\u0439': 4, '\u0418\u044e\u043d\u044c': 5, '\u0418\u044e\u043b\u044c': 6, '\u0410\u0432\u0433\u0443\u0441\u0442': 7, '\u0421\u0435\u043d\u0442\u044f\u0431\u0440\u044c': 8, '\u041e\u043a\u0442\u044f\u0431\u0440\u044c': 9, '\u041d\u043e\u044f\u0431\u0440\u044c': 10, '\u0414\u0435\u043a\u0430\u0431\u0440\u044c': 11,
+    January: 0, February: 1, March: 2, April: 3, June: 5, July: 6, August: 7, September: 8, October: 9, November: 10, December: 11 };
+  const m = idx[monthName];
+  if (m === undefined) return null;
+  // O'quv yili: Sen-Noy=1chorak, Dek-Fev=2, Mar-May=3, Iyun-Avg=4
+  if ([8, 9, 10].includes(m)) return 1;
+  if ([11, 0, 1].includes(m)) return 2;
+  if ([2, 3, 4].includes(m)) return 3;
+  return 4;
+}
+
+function renderQuarterlyContent(groupId) {
+  const students = state.students.filter(s => s.groupId === groupId);
+  if (!students.length || !students.some(s => s.grades?.length)) {
+    return `<div class="empty">${t('mQuarterlyEmpty')}</div>`;
+  }
+  const qLabels = { 1: t('q1'), 2: t('q2'), 3: t('q3'), 4: t('q4') };
+  let html = `<table><thead><tr><th>${t('colFullName')}</th><th>${qLabels[1]}</th><th>${qLabels[2]}</th><th>${qLabels[3]}</th><th>${qLabels[4]}</th></tr></thead><tbody>`;
+  students.forEach(s => {
+    const byQ = { 1: [], 2: [], 3: [], 4: [] };
+    (s.grades || []).forEach(g => {
+      const q = quarterOfMonth(g.period);
+      if (q) byQ[q].push(g.value);
+    });
+    const cell = (arr) => arr.length ? (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(2) : '\u2014';
+    html += `<tr><td><b>${esc(s.fullName)}</b></td><td>${cell(byQ[1])}</td><td>${cell(byQ[2])}</td><td>${cell(byQ[3])}</td><td>${cell(byQ[4])}</td></tr>`;
+  });
+  html += `</tbody></table>`;
+  return html;
 }
 
 /* ================= EVENT HANDLERS ================= */
@@ -539,6 +779,9 @@ function attachHandlers() {
     localStorage.setItem('theme', state.theme);
     render();
   });
+  document.querySelectorAll('[data-lang]').forEach(el => el.addEventListener('click', () => {
+    setLang(el.dataset.lang); render();
+  }));
   document.getElementById('logoutBtn')?.addEventListener('click', async () => {
     await logout();
     state.view = 'landing'; state.activeGroupId = null; state.pendingRegisterContract = false;
@@ -548,6 +791,13 @@ function attachHandlers() {
     state.modal = { type: 'notifications' };
     render();
   });
+  document.getElementById('profileBtn')?.addEventListener('click', () => {
+    if (state.role !== 'teacher') return;
+    state.profileForm = { name: state.userDoc?.fullName || '', phone: state.userDoc?.phone || '' };
+    state.modal = { type: 'profile' };
+    render();
+  });
+  document.querySelectorAll('[data-navto]').forEach(el => el.addEventListener('click', () => { state.view = el.dataset.navto; render(); }));
   document.querySelectorAll('[data-goto]').forEach(el => el.addEventListener('click', () => { state.view = el.dataset.goto; render(); }));
   document.querySelectorAll('[data-tab]').forEach(el => el.addEventListener('click', () => { state.authTab = el.dataset.tab; render(); }));
 
@@ -569,14 +819,14 @@ function attachHandlers() {
     const pass = document.getElementById('tlPass').value;
     state.authEmailTry = email;
     const lockKey = 'teacher::' + email;
-    if (getLockInfo(lockKey).locked) { toast('Hisobingiz vaqtincha bloklangan.', 'error'); return; }
+    if (getLockInfo(lockKey).locked) { toast(t('toastLocked'), 'error'); return; }
     try {
       await loginTeacher(email, pass);
       clearFails(lockKey);
       state.loginForm = { email: '', password: '' };
     } catch (err) {
       const count = registerFail(lockKey);
-      toast(`${friendlyError(err)} (urinish: ${count}/3)`, 'error');
+      toast(`${friendlyError(err)} (${t('toastAttempt')}: ${count}/3)`, 'error');
       render(); startLockCountdownIfNeeded();
     }
   });
@@ -588,8 +838,8 @@ function attachHandlers() {
 
   document.getElementById('forgotBtn')?.addEventListener('click', async () => {
     const email = document.getElementById('tlEmail').value.trim();
-    if (!email) { toast('Avval email manzilingizni kiriting.', 'error'); return; }
-    try { await resetPassword(email); toast('Parolni tiklash havolasi emailingizga yuborildi.', 'info'); }
+    if (!email) { toast(t('toastEnterEmailFirst'), 'error'); return; }
+    try { await resetPassword(email); toast(t('toastResetSent'), 'info'); }
     catch (err) { toast(friendlyError(err), 'error'); }
   });
 
@@ -604,14 +854,14 @@ function attachHandlers() {
     render();
   });
   document.getElementById('contractAcceptBtn')?.addEventListener('click', () => {
-    if (!document.getElementById('contractCheck').checked) { toast('Iltimos, avval belgini bosing.', 'error'); return; }
+    if (!document.getElementById('contractCheck').checked) { toast(t('toastFillCheckbox'), 'error'); return; }
     state.pendingRegisterContract = true;
     state.view = state.contractReturnView || 'teacherAuth';
     render();
   });
   document.getElementById('teacherRegForm')?.addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (!state.pendingRegisterContract) { toast('Avval shartnomani tasdiqlang.', 'error'); return; }
+    if (!state.pendingRegisterContract) { toast(t('toastAcceptContractFirst'), 'error'); return; }
     const fullName = document.getElementById('rName').value.trim();
     const email = document.getElementById('rEmail').value.trim();
     const phone = document.getElementById('rPhone').value.trim();
@@ -620,21 +870,21 @@ function attachHandlers() {
       await registerTeacher({ fullName, email, phone, password });
       state.pendingRegisterContract = false;
       state.regForm = { name: '', email: '', phone: '', password: '' };
-      toast('Ariza yuborildi! Administrator tasdiqlashini kuting.', 'info');
+      toast(t('toastAppSent'), 'info');
     } catch (err) { toast(friendlyError(err), 'error'); }
   });
 
   /* Google complete registration */
   document.getElementById('googleCompleteForm')?.addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (!state.pendingRegisterContract) { toast('Avval shartnomani tasdiqlang.', 'error'); return; }
+    if (!state.pendingRegisterContract) { toast(t('toastAcceptContractFirst'), 'error'); return; }
     const phone = document.getElementById('gcPhone').value.trim();
     try {
       await completeGoogleRegistration(state.firebaseUser.uid, { phone });
       state.pendingRegisterContract = false;
       const udoc = await getUserDoc(state.firebaseUser.uid);
       state.userDoc = udoc; state.view = 'teacherPending';
-      toast('Ariza yuborildi! Administrator tasdiqlashini kuting.', 'info');
+      toast(t('toastAppSent'), 'info');
       render();
     } catch (err) { toast(friendlyError(err), 'error'); }
   });
@@ -647,18 +897,90 @@ function attachHandlers() {
 
   /* Admin actions */
   document.querySelectorAll('[data-approve]').forEach(el => el.addEventListener('click', async () => {
-    await setTeacherStatus(el.dataset.approve, 'approved'); toast('O\u2019qituvchi tasdiqlandi.', 'info');
+    await setTeacherStatus(el.dataset.approve, 'approved'); toast(t('toastApproved'), 'info');
   }));
-  document.querySelectorAll('[data-reject]').forEach(el => el.addEventListener('click', async () => {
-    await setTeacherStatus(el.dataset.reject, 'rejected'); toast('Ariza rad etildi.', 'info');
+  document.querySelectorAll('[data-reject]').forEach(el => el.addEventListener('click', () => {
+    state.modal = { type: 'rejectReason', teacherId: el.dataset.reject };
+    render();
   }));
+  document.getElementById('rejectConfirmBtn')?.addEventListener('click', async () => {
+    const reason = document.getElementById('rejectReasonArea').value.trim();
+    try {
+      await rejectTeacher(state.modal.teacherId, reason);
+      toast(t('toastRejected'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
   document.getElementById('sendNotifBtn')?.addEventListener('click', async () => {
     const title = document.getElementById('notifTitle').value.trim();
     const message = document.getElementById('notifMessage').value.trim();
-    if (!title || !message) { toast('Sarlavha va xabar matnini kiriting.', 'error'); return; }
-    try { await createNotification(title, message); toast('Bildirishnoma barchaga yuborildi.', 'info'); render(); }
+    if (!title || !message) { toast(t('toastFillTitleMsg'), 'error'); return; }
+    try { await createNotification(title, message); toast(t('toastNotifSent'), 'info'); render(); }
     catch (err) { toast(friendlyError(err), 'error'); }
   });
+  document.getElementById('saveSubBtn')?.addEventListener('click', async () => {
+    const readPlan = (key) => ({
+      price: parseInt(document.getElementById(`subPrice_${key}`).value) || 0,
+      discount: parseInt(document.getElementById(`subDiscount_${key}`).value) || 0,
+      features: document.getElementById(`subFeatures_${key}`).value.split('\n').map(s => s.trim()).filter(Boolean),
+    });
+    const data = {
+      enabled: document.getElementById('subEnabled').checked,
+      plans: { free: readPlan('free'), monthly: readPlan('monthly'), yearly: readPlan('yearly') }
+    };
+    try { await saveSubscriptionSettings(data); toast(t('subPlansSaved'), 'info'); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+  });
+
+  /* Resubmit (rad etilgandan keyin qayta yuborish) */
+  document.getElementById('openResubmitBtn')?.addEventListener('click', () => { state.modal = { type: 'resubmit' }; render(); });
+  let proofDocBase64 = null;
+  document.getElementById('proofDropZone')?.addEventListener('click', () => document.getElementById('proofInput').click());
+  document.getElementById('proofInput')?.addEventListener('change', async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    try {
+      proofDocBase64 = await fileToCompressedBase64(file);
+      document.getElementById('proofPreviewWrap').innerHTML = `<img src="${proofDocBase64}" style="width:100%;border-radius:8px;margin-top:10px;border:1px solid var(--line);">`;
+    } catch (err) { toast(t('toastPhotoError'), 'error'); }
+  });
+  document.getElementById('resubmitSendBtn')?.addEventListener('click', async () => {
+    const resubmitReason = document.getElementById('resubmitReasonArea').value.trim();
+    try {
+      await resubmitApplication(state.firebaseUser.uid, { resubmitReason, proofDoc: proofDocBase64 });
+      proofDocBase64 = null;
+      const udoc = await getUserDoc(state.firebaseUser.uid);
+      state.userDoc = udoc;
+      toast(t('resubmitSent'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+
+  /* Profil */
+  document.getElementById('profileName')?.addEventListener('input', e => state.profileForm.name = e.target.value);
+  document.getElementById('profilePhone')?.addEventListener('input', e => state.profileForm.phone = e.target.value);
+  document.getElementById('profileSaveBtn')?.addEventListener('click', async () => {
+    const name = document.getElementById('profileName').value.trim();
+    const phone = document.getElementById('profilePhone').value.trim();
+    if (!name) { toast(t('toastEnterName'), 'error'); return; }
+    try {
+      await updateTeacherProfile(state.firebaseUser.uid, { fullName: name, phone });
+      const udoc = await getUserDoc(state.firebaseUser.uid);
+      state.userDoc = udoc;
+      toast(t('profileSaved'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+
+  /* Obuna rejasini tanlash */
+  document.querySelectorAll('[data-chooseplan]').forEach(el => el.addEventListener('click', async () => {
+    try {
+      await chooseSubscriptionPlan(state.firebaseUser.uid, el.dataset.chooseplan);
+      const udoc = await getUserDoc(state.firebaseUser.uid);
+      state.userDoc = udoc;
+      toast(t('subChosenToast'), 'info');
+      render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  }));
 
   /* Teacher dashboard */
   document.getElementById('newGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'newGroup' }; render(); });
@@ -668,7 +990,9 @@ function attachHandlers() {
   document.getElementById('addManualBtn')?.addEventListener('click', () => { state.modal = { type: 'addManual' }; render(); });
   document.getElementById('addPhotoBtn')?.addEventListener('click', () => { state.modal = { type: 'addPhoto' }; render(); });
   document.getElementById('bulkImportBtn')?.addEventListener('click', () => { state.modal = { type: 'bulkImport' }; render(); });
+  document.getElementById('quarterlyBtn')?.addEventListener('click', () => { state.modal = { type: 'quarterly', groupId: state.activeGroupId }; render(); });
   document.getElementById('printBtn')?.addEventListener('click', () => window.print());
+  document.getElementById('excelExportBtn')?.addEventListener('click', () => exportGroupToExcel());
   document.querySelectorAll('[data-addgrade]').forEach(el => el.addEventListener('click', () => { state.modal = { type: 'addGrade', studentId: el.dataset.addgrade }; render(); }));
   document.querySelectorAll('[data-delstudent]').forEach(el => el.addEventListener('click', async () => { await deleteStudent(el.dataset.delstudent); }));
 
@@ -679,7 +1003,7 @@ function attachHandlers() {
   document.getElementById('ngSave')?.addEventListener('click', async () => {
     const name = document.getElementById('ngName').value.trim();
     const subject = document.getElementById('ngSubject').value.trim();
-    if (!name || !subject) { toast('Barcha maydonlarni to\u2019ldiring.', 'error'); return; }
+    if (!name || !subject) { toast(t('toastFillAllFields'), 'error'); return; }
     const gid = await createGroup(state.firebaseUser.uid, name, subject);
     state.activeGroupId = gid; subscribeStudentsIfNeeded();
     state.modal = null; render();
@@ -688,7 +1012,7 @@ function attachHandlers() {
   document.getElementById('amSave')?.addEventListener('click', async () => {
     const name = document.getElementById('amName').value.trim();
     const cls = document.getElementById('amClass').value.trim();
-    if (!name) { toast('Ismni kiriting.', 'error'); return; }
+    if (!name) { toast(t('toastEnterName'), 'error'); return; }
     await addStudent(state.firebaseUser.uid, state.activeGroupId, { fullName: name, className: cls });
     state.modal = null; render();
   });
@@ -697,17 +1021,17 @@ function attachHandlers() {
   document.getElementById('photoDropZone')?.addEventListener('click', () => document.getElementById('photoInput').click());
   document.getElementById('photoInput')?.addEventListener('change', async (e) => {
     const file = e.target.files[0]; if (!file) return;
-    const zone = document.getElementById('photoDropZone'); zone.textContent = '\u23F3 Siqilmoqda...';
+    const zone = document.getElementById('photoDropZone'); zone.textContent = t('toastCompressing');
     try {
       selectedPhotoBase64 = await fileToCompressedBase64(file);
       document.getElementById('photoPreviewWrap').innerHTML = `<img src="${selectedPhotoBase64}" style="width:100%;border-radius:8px;margin-top:10px;border:1px solid var(--line);">`;
-      zone.textContent = '\u{1F4E4} Rasmni tanlash uchun bosing (almashtirish)';
-    } catch (err) { toast('Rasmni o\u2019qishda xatolik.', 'error'); zone.textContent = '\u{1F4E4} Rasmni tanlash uchun bosing'; }
+      zone.textContent = t('mPickPhoto');
+    } catch (err) { toast(t('toastPhotoError'), 'error'); zone.textContent = t('mPickPhoto'); }
   });
   document.getElementById('apSave')?.addEventListener('click', async () => {
     const name = document.getElementById('apName').value.trim();
     const cls = document.getElementById('apClass').value.trim();
-    if (!name) { toast('Ismni kiriting.', 'error'); return; }
+    if (!name) { toast(t('toastEnterName'), 'error'); return; }
     try {
       await addStudent(state.firebaseUser.uid, state.activeGroupId, {
         fullName: name, className: cls, photo: selectedPhotoBase64, fromPhoto: !!selectedPhotoBase64
@@ -720,8 +1044,9 @@ function attachHandlers() {
   document.getElementById('agSave')?.addEventListener('click', async () => {
     const subject = document.getElementById('agSubject').value.trim();
     const value = parseInt(document.getElementById('agValue').value);
-    if (!subject) { toast('Fan nomini kiriting.', 'error'); return; }
-    await addGrade(state.modal.studentId, subject, value);
+    const period = document.getElementById('agPeriod')?.value || '';
+    if (!subject) { toast(t('toastEnterSubject'), 'error'); return; }
+    await addGrade(state.modal.studentId, subject, value, period);
     state.modal = null; render();
   });
 
@@ -730,37 +1055,57 @@ function attachHandlers() {
   document.getElementById('bulkFileInput')?.addEventListener('change', async (e) => {
     const file = e.target.files[0]; if (!file) return;
     const zone = document.getElementById('bulkFileDropZone');
-    zone.textContent = '\u23F3 Fayl o\u2019qilmoqda...';
+    zone.textContent = t('toastFileReading');
     try {
       const names = await parseRosterFile(file);
       document.getElementById('bulkNamesArea').value = names.join('\n');
       zone.textContent = names.length
-        ? `\u2705 ${names.length} ta ism topildi \u2014 pastda tekshirib, kerak bo'lsa tahrirlang`
-        : '\u26A0\uFE0F Ism topilmadi, pastga qo\u2019lda kiriting';
+        ? `\u2705 ${names.length} ${t('toastNamesFound')}`
+        : `\u26A0\uFE0F ${t('toastNoNamesFound')}`;
     } catch (err) {
-      toast('Faylni o\u2019qib bo\u2019lmadi: ' + (err.message || ''), 'error');
-      zone.textContent = '\u{1F4E4} Faylni tanlash uchun bosing';
+      toast(t('toastFileReadError') + ' ' + (err.message || ''), 'error');
+      zone.textContent = t('mPickFile');
     }
   });
   document.getElementById('bulkSave')?.addEventListener('click', async () => {
     const cls = document.getElementById('bulkClass').value.trim();
     const raw = document.getElementById('bulkNamesArea').value;
     const names = raw.split('\n').map(s => s.trim()).filter(Boolean);
-    if (!names.length) { toast('Kamida bitta ism kiriting.', 'error'); return; }
-    const btn = document.getElementById('bulkSave'); btn.disabled = true; btn.textContent = 'Qo\u2019shilmoqda...';
+    if (!names.length) { toast(t('toastEnterOneName'), 'error'); return; }
+    const btn = document.getElementById('bulkSave'); btn.disabled = true; btn.textContent = t('toastAdding');
     try {
       for (const name of names) {
         await addStudent(state.firebaseUser.uid, state.activeGroupId, { fullName: name, className: cls });
       }
-      toast(`${names.length} ta o'quvchi qo'shildi.`, 'info');
+      toast(`${names.length} ${t('toastStudentsAdded')}`, 'info');
       state.modal = null; render();
     } catch (err) {
       toast(friendlyError(err), 'error');
-      btn.disabled = false; btn.textContent = 'Barchasini qo\u2019shish';
+      btn.disabled = false; btn.textContent = t('mBulkAddAll');
     }
   });
 }
 
+function exportGroupToExcel() {
+  const group = state.groups.find(g => g.id === state.activeGroupId);
+  const students = state.students.filter(s => s.groupId === state.activeGroupId);
+  if (!group || !students.length) { toast(t('emptyStudents').replace(/<br>/g, ' '), 'error'); return; }
+  const rows = students.map((s, i) => {
+    const a = studentAvg(s); const lvl = levelLabel(a);
+    return {
+      [t('colNum')]: i + 1,
+      [t('colFullName')]: s.fullName,
+      [t('colClass')]: s.className || '',
+      [t('colGrades')]: (s.grades || []).map(g => `${g.subject}:${g.value}`).join(', '),
+      [t('colAvg')]: a ? Number(a.toFixed(2)) : '',
+      [t('colLevel')]: lvl.label,
+    };
+  });
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, group.name.slice(0, 28) || 'Sheet1');
+  XLSX.writeFile(wb, `${group.name || 'guruh'}.xlsx`);
+}
 
 function startLockCountdownIfNeeded() {
   const el = document.getElementById('lockCountdown');
