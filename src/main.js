@@ -11,7 +11,7 @@ import {
   watchSubscriptionSettings, saveSubscriptionSettings, chooseSubscriptionPlan
 } from './db.js';
 import { auth } from './firebase.js';
-import { parseRosterFile } from './importparsers.js';
+import { parseRosterFile } from './importParsers.js';
 import { t, LANGS, getLang, setLang, contractText } from './i18n.js';
 import * as XLSX from 'xlsx';
 
