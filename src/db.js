@@ -1,5 +1,5 @@
 import {
-  collection, doc, addDoc, updateDoc, deleteDoc, getDocs, getDoc,
+  collection, doc, addDoc, updateDoc, deleteDoc, getDocs, getDoc, setDoc,
   query, where, orderBy, onSnapshot, serverTimestamp, arrayUnion
 } from 'firebase/firestore';
 import { db } from './firebase.js';
@@ -13,6 +13,22 @@ export function watchAllTeachers(callback) {
 }
 export async function setTeacherStatus(uid, status) {
   await updateDoc(doc(db, 'users', uid), { status, decidedAt: serverTimestamp() });
+}
+export async function rejectTeacher(uid, reason) {
+  await updateDoc(doc(db, 'users', uid), { status: 'rejected', rejectionReason: reason || '', decidedAt: serverTimestamp() });
+}
+export async function resubmitApplication(uid, { resubmitReason, proofDoc }) {
+  const data = {
+    status: 'pending',
+    resubmitReason: resubmitReason || '',
+    rejectionReason: '',
+    resubmittedAt: serverTimestamp()
+  };
+  if (proofDoc) data.proofDocs = arrayUnion(proofDoc);
+  await updateDoc(doc(db, 'users', uid), data);
+}
+export async function updateTeacherProfile(uid, { fullName, phone }) {
+  await updateDoc(doc(db, 'users', uid), { fullName, phone });
 }
 
 /* ---------- groups ---------- */
@@ -51,9 +67,9 @@ export async function addStudent(teacherId, groupId, { fullName, className, phot
 export async function deleteStudent(studentId) {
   await deleteDoc(doc(db, 'students', studentId));
 }
-export async function addGrade(studentId, subject, value) {
+export async function addGrade(studentId, subject, value, period) {
   await updateDoc(doc(db, 'students', studentId), {
-    grades: arrayUnion({ subject, value, date: Date.now() })
+    grades: arrayUnion({ subject, value, date: Date.now(), period: period || null })
   });
 }
 
@@ -68,8 +84,28 @@ export async function createNotification(title, message) {
   await addDoc(collection(db, 'notifications'), { title, message, createdAt: serverTimestamp() });
 }
 
+/* ---------- obuna sozlamalari (admin boshqaradi, hamma o'qiy oladi) ---------- */
+const DEFAULT_PLANS = {
+  enabled: false,
+  plans: {
+    free: { price: 0, discount: 0, features: ["1 ta guruh", "20 tagacha o'quvchi", "Asosiy hisobotlar"] },
+    monthly: { price: 49000, discount: 0, features: ["Cheksiz guruh", "Cheksiz o'quvchi", "Excel eksport", "Bildirishnomalar"] },
+    yearly: { price: 490000, discount: 15, features: ["Cheksiz guruh", "Cheksiz o'quvchi", "Excel eksport", "Bildirishnomalar", "Ustuvor yordam"] },
+  }
+};
+export function watchSubscriptionSettings(callback) {
+  return onSnapshot(doc(db, 'settings', 'subscription'), snap => {
+    callback(snap.exists() ? snap.data() : DEFAULT_PLANS);
+  });
+}
+export async function saveSubscriptionSettings(data) {
+  await setDoc(doc(db, 'settings', 'subscription'), data, { merge: true });
+}
+export async function chooseSubscriptionPlan(uid, planKey) {
+  await updateDoc(doc(db, 'users', uid), { selectedPlan: planKey });
+}
+
 /* ---------- admin bootstrap helper (run once manually, see README) ---------- */
 export async function grantAdmin(uid) {
-  const { setDoc } = await import('firebase/firestore');
   await setDoc(doc(db, 'admins', uid), { grantedAt: serverTimestamp() });
 }
