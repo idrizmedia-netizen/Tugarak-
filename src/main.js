@@ -8,7 +8,8 @@ import {
   watchGroupStudents, addStudent, deleteStudent, addGrade,
   watchNotifications, createNotification,
   rejectTeacher, resubmitApplication, updateTeacherProfile,
-  watchSubscriptionSettings, saveSubscriptionSettings, chooseSubscriptionPlan, markPlanContacted
+  watchSubscriptionSettings, saveSubscriptionSettings, chooseSubscriptionPlan, markPlanContacted,
+  activateSubscription
 } from './db.js';
 import { auth } from './firebase.js';
 import { parseRosterFile } from './importParsers.js';
@@ -157,7 +158,9 @@ function render() {
   if (!state.firebaseUser) {
     app.innerHTML = renderAuthGate();
   } else if (state.role === 'admin') {
-    app.innerHTML = renderShell(renderAdminDash(), 'adminDash');
+    if (state.view === 'adminNotifications') app.innerHTML = renderShell(renderAdminNotificationsView(), 'adminNotifications');
+    else if (state.view === 'adminSubscription') app.innerHTML = renderShell(renderAdminSubscriptionView(), 'adminSubscription');
+    else app.innerHTML = renderShell(renderAdminDash(), 'adminDash');
   } else if (state.view === 'googleComplete') {
     app.innerHTML = renderGoogleCompleteScreen();
   } else if (state.view === 'teacherPending' || (state.userDoc && state.userDoc.status !== 'approved')) {
@@ -188,6 +191,43 @@ function sealSVG(size) {
   </svg>`;
 }
 
+/* ---------- OBUNA HOLATI VA CHEKLOVLAR ---------- */
+const GRACE_MS = 30 * 24 * 60 * 60 * 1000; // 1 oy imtiyoz muddati
+
+function getSubStatus() {
+  const ud = state.userDoc;
+  const plan = ud?.plan || 'free';
+  if (plan === 'free') return { plan: 'free', state: 'active' };
+  const expiresAtMs = ud?.planExpiresAt?.toMillis ? ud.planExpiresAt.toMillis() : null;
+  if (!expiresAtMs) return { plan, state: 'active' };
+  const now = Date.now();
+  if (now <= expiresAtMs) return { plan, state: 'active', expiresAtMs };
+  if (now <= expiresAtMs + GRACE_MS) return { plan, state: 'grace', expiresAtMs, graceUntilMs: expiresAtMs + GRACE_MS };
+  return { plan, state: 'expired', expiresAtMs };
+}
+function getGroupLimit() {
+  const status = getSubStatus();
+  const plans = state.subscription?.plans || {};
+  const key = status.state === 'expired' ? 'free' : status.plan;
+  const limit = plans[key]?.maxGroups;
+  return typeof limit === 'number' ? limit : 0; // 0 = cheksiz
+}
+function sortedGroupsForLimit() {
+  return [...state.groups].sort((a, b) => (a.createdAt?.toMillis?.() || 0) - (b.createdAt?.toMillis?.() || 0));
+}
+function isGroupLocked(group) {
+  const limit = getGroupLimit();
+  if (!limit) return false;
+  const sorted = sortedGroupsForLimit();
+  const idx = sorted.findIndex(g => g.id === group.id);
+  return idx >= limit;
+}
+function atGroupLimit() {
+  const limit = getGroupLimit();
+  if (!limit) return false;
+  return state.groups.length >= limit;
+}
+
 function hasUnreadNotifications() {
   const seenCount = parseInt(localStorage.getItem('notif-seenCount') || '0');
   return state.notifications.length > seenCount;
@@ -211,7 +251,7 @@ function topbar() {
 function renderShell(inner, activeView) {
   const role = state.role;
   const nav = role === 'admin'
-    ? [['adminDash', '\u{1F5C2}', t('navAdmin')]]
+    ? [['adminDash', '\u{1F5C2}', t('navApprovals')], ['adminNotifications', '\u{1F4E2}', t('navNotifications')], ['adminSubscription', '\u{1F4B3}', t('navSubscription')]]
     : [['teacherDash', '\u{1F3E0}', t('navTeacher')], ['subscription', '\u{1F4B3}', t('navSubscription')]];
   const navBtn = (v, ic, l, cls) => `<button class="${v === activeView ? 'active' : ''}" data-navto="${v}">${cls === 'bottom' ? `${ic}<span>${l}</span>` : `${ic} ${l}`}</button>`;
   return `${topbar()}
@@ -418,18 +458,6 @@ function renderAdminDash() {
       </div>`).join('')}
   </div>
 
-  ${renderSubscriptionAdminCard()}
-  ${renderSubscriptionRequestsCard()}
-
-  <div class="card">
-    <h2>${t('notifSectionTitle')}</h2>
-    <div class="muted">${t('notifSectionDesc')}</div>
-    <div class="divider"></div>
-    <label>${t('notifTitleLabel')}</label><input type="text" id="notifTitle" placeholder="${t('notifTitlePh')}">
-    <label>${t('notifMsgLabel')}</label>
-    <textarea id="notifMessage" rows="3" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:14px;font-family:inherit;" placeholder="${t('notifMsgPh')}"></textarea>
-    <button class="btn btn-teal" id="sendNotifBtn" style="margin-top:12px;">${t('notifSend')}</button>
-  </div>
   <div class="card">
     <h2>${t('applicationsTitle')}</h2>
     <div class="muted">${t('applicationsDesc')}</div>
@@ -461,15 +489,32 @@ function renderAdminDash() {
 }
 
 /* ---------- OBUNA: admin boshqaruvi ---------- */
+/* ---------- ADMIN: alohida sahifalar (sidebar orqali) ---------- */
+function renderAdminNotificationsView() {
+  return `<div class="card">
+    <h2>${t('notifSectionTitle')}</h2>
+    <div class="muted">${t('notifSectionDesc')}</div>
+    <div class="divider"></div>
+    <label>${t('notifTitleLabel')}</label><input type="text" id="notifTitle" placeholder="${t('notifTitlePh')}">
+    <label>${t('notifMsgLabel')}</label>
+    <textarea id="notifMessage" rows="3" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:14px;font-family:inherit;" placeholder="${t('notifMsgPh')}"></textarea>
+    <button class="btn btn-teal" id="sendNotifBtn" style="margin-top:12px;">${t('notifSend')}</button>
+  </div>`;
+}
+function renderAdminSubscriptionView() {
+  return `${renderSubscriptionAdminCard()}${renderSubscriptionRequestsCard()}`;
+}
+
 function renderSubscriptionAdminCard() {
   const sub = state.subscription || {};
   const plans = sub.plans || {};
   const planCard = (key, labelKey) => {
-    const p = plans[key] || { price: 0, discount: 0, features: [] };
+    const p = plans[key] || { price: 0, discount: 0, maxGroups: 0, features: [] };
     return `<div class="card" style="margin-bottom:0;">
       <h3 style="margin:0 0 10px;font-size:15px;">${t(labelKey)}</h3>
       <label>${t('subPriceLabel')}</label><input type="text" inputmode="numeric" id="subPrice_${key}" value="${p.price || 0}">
       <label>${t('subDiscountLabel')}</label><input type="text" inputmode="numeric" id="subDiscount_${key}" value="${p.discount || 0}">
+      <label>${t('subMaxGroupsLabel')}</label><input type="text" inputmode="numeric" id="subMaxGroups_${key}" value="${p.maxGroups ?? 0}">
       <label>${t('subFeaturesLabel')}</label>
       <textarea id="subFeatures_${key}" rows="4" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:13px;font-family:inherit;">${esc((p.features || []).join('\n'))}</textarea>
     </div>`;
@@ -498,14 +543,21 @@ function renderSubscriptionRequestsCard() {
     <div class="muted">${t('subRequestsDesc')}</div>
     <div class="divider"></div>
     ${requests.length === 0 ? `<div class="empty">${t('subRequestsEmpty')}</div>` :
-      requests.map(tc => `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;padding:12px 0;border-bottom:1px solid var(--line);">
+      requests.map(tc => {
+        const isActivePlan = tc.plan === tc.selectedPlan;
+        return `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;padding:12px 0;border-bottom:1px solid var(--line);">
         <div>
           <b>${esc(tc.fullName)}</b> <span class="tag-subject">${t(planLabels[tc.selectedPlan] || 'subFree')}</span>
-          <span class="pill ${tc.planContacted ? 'approved' : 'pending'}">${tc.planContacted ? t('subRequestContacted') : t('subRequestNew')}</span><br>
+          <span class="pill ${tc.planContacted ? 'approved' : 'pending'}">${tc.planContacted ? t('subRequestContacted') : t('subRequestNew')}</span>
+          ${isActivePlan ? `<span class="pill approved">\u2705 ${t('subActivateBtn')}</span>` : ''}<br>
           <span class="muted">${esc(tc.email)} \u00B7 ${esc(tc.phone || '')}</span>
         </div>
-        ${!tc.planContacted ? `<button class="btn btn-outline" data-markcontacted="${tc.id}">${t('subMarkContacted')}</button>` : ''}
-      </div>`).join('')}
+        <div style="display:flex;gap:8px;">
+          ${!tc.planContacted ? `<button class="btn btn-outline" data-markcontacted="${tc.id}">${t('subMarkContacted')}</button>` : ''}
+          ${!isActivePlan ? `<button class="btn btn-teal" data-activateplan="${tc.id}" data-plankey="${tc.selectedPlan}">${t('subActivateBtn')}</button>` : ''}
+        </div>
+      </div>`;
+      }).join('')}
   </div>`;
 }
 
@@ -513,7 +565,8 @@ function renderSubscriptionRequestsCard() {
 function renderSubscriptionView() {
   const sub = state.subscription || {};
   const plans = sub.plans || {};
-  const myPlan = state.userDoc?.selectedPlan;
+  const myPlan = state.userDoc?.plan || 'free';
+  const status = getSubStatus();
   const fmt = (n) => Number(n || 0).toLocaleString();
   const ICONS = { free: '\u{1F331}', monthly: '\u2B50', yearly: '\u{1F451}' };
   const planCard = (key, labelKey) => {
@@ -541,6 +594,9 @@ function renderSubscriptionView() {
     <h2 style="margin:0;">${t('subTitle')}</h2>
     <div class="muted">${t('subDesc')}</div>
     ${!sub.enabled ? `<div class="info-box" style="margin-top:12px;">${t('subDisabledNote')}</div>` : ''}
+    ${sub.enabled && myPlan !== 'free' && status.state === 'active' ? `<div class="info-box" style="margin-top:12px;">${t('subActiveUntil')} ${status.expiresAtMs ? new Date(status.expiresAtMs).toLocaleDateString() : '\u2014'}</div>` : ''}
+    ${status.state === 'grace' ? `<div class="error-box" style="margin-top:12px;">${t('subGraceBanner', { days: Math.max(0, Math.ceil((status.graceUntilMs - Date.now()) / 86400000)) })}</div>` : ''}
+    ${status.state === 'expired' ? `<div class="error-box" style="margin-top:12px;">${t('subExpiredBanner', { limit: (plans.free?.maxGroups ?? 1) })}</div>` : ''}
   </div>
   <div class="plan-grid">
     ${planCard('free', 'subFree')}
@@ -563,14 +619,18 @@ function levelLabel(avg) {
 function renderTeacherDash() {
   const myGroups = state.groups;
   const activeGroup = myGroups.find(g => g.id === state.activeGroupId) || myGroups[0];
+  const status = getSubStatus();
+  const limit = getGroupLimit();
   return `
+  ${status.state === 'grace' ? `<div class="error-box no-print" style="margin-bottom:16px;">${t('subGraceBanner', { days: Math.max(0, Math.ceil((status.graceUntilMs - Date.now()) / 86400000)) })} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>` : ''}
+  ${status.state === 'expired' ? `<div class="error-box no-print" style="margin-bottom:16px;">${t('subExpiredBanner', { limit })} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>` : ''}
   <div class="card no-print">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div><h2 style="margin:0;">${t('groupsTitle')}</h2><div class="muted">${t('groupsDesc')}</div></div>
       <button class="btn btn-teal" id="newGroupBtn">${t('newGroupBtn')}</button>
     </div>
     ${myGroups.length ? `<div class="divider"></div><div style="display:flex;gap:8px;flex-wrap:wrap;">
-      ${myGroups.map(g => `<button class="btn ${g.id === state.activeGroupId ? 'btn-primary' : 'btn-outline'}" data-selectgroup="${g.id}">${esc(g.name)} <span class="muted" style="opacity:.8">\u00B7 ${esc(g.subject)}</span></button>`).join('')}
+      ${myGroups.map(g => `<button class="btn ${g.id === state.activeGroupId ? 'btn-primary' : 'btn-outline'}" data-selectgroup="${g.id}">${isGroupLocked(g) ? '\u{1F512} ' : ''}${esc(g.name)} <span class="muted" style="opacity:.8">\u00B7 ${esc(g.subject)}</span></button>`).join('')}
     </div>` : `<div class="empty" style="padding-top:14px;"><div class="big-icon">\u{1F4DA}</div>${t('emptyGroups')}</div>`}
   </div>
   ${activeGroup ? renderGroupPanel(activeGroup) : ''}
@@ -578,6 +638,7 @@ function renderTeacherDash() {
 }
 
 function renderGroupPanel(group) {
+  const locked = isGroupLocked(group);
   const students = state.students.filter(s => s.groupId === group.id);
   const withGrades = students.filter(s => s.grades && s.grades.length);
   const avg = withGrades.length ? withGrades.reduce((a, s) => a + studentAvg(s), 0) / withGrades.length : 0;
@@ -585,16 +646,22 @@ function renderGroupPanel(group) {
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div><h2 style="margin:0;">${esc(group.name)}</h2><span class="tag-subject">${esc(group.subject)}</span></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;" class="no-print">
-        <button class="btn btn-outline" id="addManualBtn">${t('addManualBtn')}</button>
-        <button class="btn btn-outline" id="addPhotoBtn">${t('addPhotoBtn')}</button>
-        <button class="btn btn-outline" id="bulkImportBtn">${t('bulkImportBtn')}</button>
+        <button class="btn btn-outline" id="addManualBtn" ${locked ? 'disabled' : ''}>${t('addManualBtn')}</button>
+        <button class="btn btn-outline" id="addPhotoBtn" ${locked ? 'disabled' : ''}>${t('addPhotoBtn')}</button>
+        <button class="btn btn-outline" id="bulkImportBtn" ${locked ? 'disabled' : ''}>${t('bulkImportBtn')}</button>
         <button class="btn btn-outline" id="quarterlyBtn">${t('quarterlyBtn')}</button>
-        <button class="btn btn-outline" id="excelExportBtn">${t('exportExcelBtn')}</button>
-        <button class="btn btn-primary" id="printBtn">${t('exportPrintBtn')}</button>
+        <button class="btn btn-outline" id="excelExportBtn" ${locked ? 'disabled' : ''}>${t('exportExcelBtn')}</button>
+        <button class="btn btn-primary" id="printBtn" ${locked ? 'disabled' : ''}>${t('exportPrintBtn')}</button>
       </div>
     </div>
+    ${locked ? `<div class="error-box" style="margin-top:12px;"><b>${t('groupLockedTitle')}</b><br>${t('groupLockedMsg')} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>` : ''}
     <div class="divider"></div>
     ${students.length === 0 ? `<div class="empty"><div class="big-icon">\u{1F9D2}</div>${t('emptyStudents')}</div>` : `
+    <div style="display:none;" class="jurnal-header" id="jurnalHeader">
+      <h2 style="text-align:center;margin:0 0 4px;">TO'GARAK JURNALI</h2>
+      <p style="text-align:center;margin:0 0 4px;">"${esc(group.name)}" to'garagi \u2014 ${esc(group.subject)}</p>
+      <p style="text-align:center;margin:0 0 16px;">Rahbar: ${esc(state.userDoc?.fullName || '')} &nbsp;\u00B7&nbsp; ${new Date().getFullYear()}-${new Date().getFullYear() + 1} o'quv yili</p>
+    </div>
     <table><thead><tr><th>${t('colNum')}</th><th>${t('colPhoto')}</th><th>${t('colFullName')}</th><th>${t('colClass')}</th><th>${t('colGrades')}</th><th>${t('colAvg')}</th><th>${t('colLevel')}</th><th class="no-print"></th></tr></thead><tbody>
     ${students.map((s, i) => {
       const a = studentAvg(s); const lvl = levelLabel(a);
@@ -604,11 +671,11 @@ function renderGroupPanel(group) {
         <td><b>${esc(s.fullName)}</b>${s.fromPhoto ? ` <span class="muted" style="font-size:11px;">${t('fromPhotoTag')}</span>` : ''}</td>
         <td>${esc(s.className || '\u2014')}</td>
         <td>${(s.grades || []).map(g => `<span class="grade ${gradeClass(g.value)}" title="${esc(g.subject)}${g.period ? ' \u00B7 ' + esc(g.period) : ''}">${g.value}</span>`).join(' ') || '<span class="muted">\u2014</span>'}
-          <button class="link-btn no-print" data-addgrade="${s.id}" style="margin-left:6px;">${t('addGradeLink')}</button></td>
+          <button class="link-btn no-print" data-addgrade="${s.id}" style="margin-left:6px;" ${locked ? 'disabled' : ''}>${t('addGradeLink')}</button></td>
         <td><b>${a ? a.toFixed(2) : '\u2014'}</b></td>
         <td><span style="color:${lvl.c};font-weight:700;">${lvl.label}</span>
           <div class="progress-bar" style="margin-top:4px;"><div style="width:${Math.min(100, a / 5 * 100)}%;"></div></div></td>
-        <td class="no-print"><button class="link-btn" data-delstudent="${s.id}" style="color:var(--danger);">${t('deleteLink')}</button></td>
+        <td class="no-print"><button class="link-btn" data-delstudent="${s.id}" style="color:var(--danger);" ${locked ? 'disabled' : ''}>${t('deleteLink')}</button></td>
       </tr>`;
     }).join('')}
     </tbody></table>
@@ -946,6 +1013,7 @@ function attachHandlers() {
     const readPlan = (key) => ({
       price: parseInt(document.getElementById(`subPrice_${key}`).value) || 0,
       discount: parseInt(document.getElementById(`subDiscount_${key}`).value) || 0,
+      maxGroups: parseInt(document.getElementById(`subMaxGroups_${key}`).value) || 0,
       features: document.getElementById(`subFeatures_${key}`).value.split('\n').map(s => s.trim()).filter(Boolean),
     });
     const data = {
@@ -955,6 +1023,12 @@ function attachHandlers() {
     try { await saveSubscriptionSettings(data); toast(t('subPlansSaved'), 'info'); }
     catch (err) { toast(friendlyError(err), 'error'); }
   });
+  document.querySelectorAll('[data-activateplan]').forEach(el => el.addEventListener('click', async () => {
+    try {
+      await activateSubscription(el.dataset.activateplan, el.dataset.plankey);
+      toast(t('subActivated'), 'info');
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  }));
   document.querySelectorAll('[data-markcontacted]').forEach(el => el.addEventListener('click', async () => {
     try { await markPlanContacted(el.dataset.markcontacted); }
     catch (err) { toast(friendlyError(err), 'error'); }
@@ -1011,7 +1085,10 @@ function attachHandlers() {
   }));
 
   /* Teacher dashboard */
-  document.getElementById('newGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'newGroup' }; render(); });
+  document.getElementById('newGroupBtn')?.addEventListener('click', () => {
+    if (atGroupLimit()) { toast(t('groupLimitReachedMsg'), 'error'); return; }
+    state.modal = { type: 'newGroup' }; render();
+  });
   document.querySelectorAll('[data-selectgroup]').forEach(el => el.addEventListener('click', () => {
     state.activeGroupId = el.dataset.selectgroup; subscribeStudentsIfNeeded(); render();
   }));
@@ -1029,6 +1106,7 @@ function attachHandlers() {
   document.getElementById('modalBg')?.addEventListener('click', (e) => { if (e.target.id === 'modalBg') { state.modal = null; render(); } });
 
   document.getElementById('ngSave')?.addEventListener('click', async () => {
+    if (atGroupLimit()) { toast(t('groupLimitReachedMsg'), 'error'); state.modal = null; render(); return; }
     const name = document.getElementById('ngName').value.trim();
     const subject = document.getElementById('ngSubject').value.trim();
     if (!name || !subject) { toast(t('toastFillAllFields'), 'error'); return; }
