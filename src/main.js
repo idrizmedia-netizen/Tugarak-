@@ -4,12 +4,13 @@ import {
   resetPassword, logout, isAdmin, getUserDoc, getLockInfo, registerFail, clearFails
 } from './auth.js';
 import {
-  watchAllTeachers, setTeacherStatus, watchMyGroups, createGroup,
+  watchAllTeachers, setTeacherStatus, watchMyGroups, createGroup, updateGroup, deleteGroup,
   watchGroupStudents, addStudent, deleteStudent, addGrade,
   watchNotifications, createNotification,
   rejectTeacher, resubmitApplication, updateTeacherProfile,
   watchSubscriptionSettings, saveSubscriptionSettings, chooseSubscriptionPlan, markPlanContacted,
-  activateSubscription
+  activateSubscription, watchAd, saveAd,
+  watchGroupDocs, addGroupDoc, deleteGroupDoc
 } from './db.js';
 import { auth } from './firebase.js';
 import { parseRosterFile } from './importParsers.js';
@@ -56,9 +57,11 @@ let state = {
   notifications: [],
   subscription: { enabled: false, plans: { free: { price: 0, discount: 0, features: [] }, monthly: { price: 0, discount: 0, features: [] }, yearly: { price: 0, discount: 0, features: [] } } },
   profileForm: { name: '', phone: '' },
+  ad: { enabled: false, title: '', text: '', link: '', image: null },
+  groupDocs: [],
 };
 
-let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null;
+let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAd = null, unsubGroupDocs = null;
 const uid = () => 'x' + Math.random().toString(36).slice(2, 9);
 
 function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -86,6 +89,15 @@ function toast(msg, kind) {
 }
 
 /* ================= AUTH STATE WIRING ================= */
+/* ---------- PWA: "Ilovani o'rnatish" tugmasi ---------- */
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  render();
+});
+window.addEventListener('appinstalled', () => { deferredInstallPrompt = null; render(); });
+
 watchAuth(async (user) => {
   state.firebaseUser = user;
   if (unsubTeachers) { unsubTeachers(); unsubTeachers = null; }
@@ -93,6 +105,8 @@ watchAuth(async (user) => {
   if (unsubStudents) { unsubStudents(); unsubStudents = null; }
   if (unsubNotifications) { unsubNotifications(); unsubNotifications = null; }
   if (unsubSubscription) { unsubSubscription(); unsubSubscription = null; }
+  if (unsubAd) { unsubAd(); unsubAd = null; }
+  if (unsubGroupDocs) { unsubGroupDocs(); unsubGroupDocs = null; }
 
   if (!user) {
     state.role = null; state.userDoc = null; state.notifications = [];
@@ -103,9 +117,10 @@ watchAuth(async (user) => {
   }
 
   // Tizimga kirgan har qanday foydalanuvchi (admin yoki o'qituvchi)
-  // bildirishnomalarni va obuna sozlamalarini ko'ra oladi.
+  // bildirishnomalarni, obuna sozlamalarini va reklamani ko'ra oladi.
   unsubNotifications = watchNotifications(list => { state.notifications = list; render(); });
   unsubSubscription = watchSubscriptionSettings(sub => { state.subscription = sub; render(); });
+  unsubAd = watchAd(ad => { state.ad = ad; render(); });
 
   const admin = await isAdmin(user.uid, user.email);
   if (admin) {
@@ -127,6 +142,7 @@ watchAuth(async (user) => {
       state.groups = list;
       if (!state.activeGroupId && list.length) state.activeGroupId = list[0].id;
       subscribeStudentsIfNeeded();
+      subscribeGroupDocsIfNeeded();
       render();
     });
   } else {
@@ -139,6 +155,12 @@ function subscribeStudentsIfNeeded() {
   if (unsubStudents) { unsubStudents(); unsubStudents = null; }
   if (state.activeGroupId) {
     unsubStudents = watchGroupStudents(state.activeGroupId, list => { state.students = list; render(); });
+  }
+}
+function subscribeGroupDocsIfNeeded() {
+  if (unsubGroupDocs) { unsubGroupDocs(); unsubGroupDocs = null; }
+  if (state.activeGroupId) {
+    unsubGroupDocs = watchGroupDocs(state.activeGroupId, list => { state.groupDocs = list; render(); });
   }
 }
 
@@ -160,6 +182,7 @@ function render() {
   } else if (state.role === 'admin') {
     if (state.view === 'adminNotifications') app.innerHTML = renderShell(renderAdminNotificationsView(), 'adminNotifications');
     else if (state.view === 'adminSubscription') app.innerHTML = renderShell(renderAdminSubscriptionView(), 'adminSubscription');
+    else if (state.view === 'adminAds') app.innerHTML = renderShell(renderAdminAdsView(), 'adminAds');
     else app.innerHTML = renderShell(renderAdminDash(), 'adminDash');
   } else if (state.view === 'googleComplete') {
     app.innerHTML = renderGoogleCompleteScreen();
@@ -178,7 +201,9 @@ function langSwitcherHTML(fixed) {
   const btns = LANGS.map(l => `<button data-lang="${l.code}" style="border:none;background:${l.code === cur ? 'var(--teal)' : 'transparent'};color:${l.code === cur ? '#fff' : 'var(--ink-soft)'};font-size:11px;font-weight:700;padding:4px 8px;border-radius:16px;cursor:pointer;">${l.code.toUpperCase()}</button>`).join('');
   const wrap = `<div style="display:flex;gap:2px;background:var(--paper-2);border:1px solid var(--line);border-radius:20px;padding:3px;">${btns}</div>`;
   if (!fixed) return wrap;
-  return `<div style="position:fixed;top:14px;right:14px;z-index:150;display:flex;gap:8px;align-items:center;">${wrap}<button class="theme-toggle" id="themeToggle" aria-label="Tun/kun rejimi"></button></div>`;
+  return `<div style="position:fixed;top:14px;right:14px;z-index:150;display:flex;gap:8px;align-items:center;">
+    ${deferredInstallPrompt ? `<button class="btn btn-outline" id="installBtn" style="padding:6px 12px;font-size:12px;background:var(--surface);">\u{1F4F2} ${t('installApp')}</button>` : ''}
+    ${wrap}<button class="theme-toggle" id="themeToggle" aria-label="Tun/kun rejimi"></button></div>`;
 }
 
 function sealSVG(size) {
@@ -227,6 +252,18 @@ function atGroupLimit() {
   if (!limit) return false;
   return state.groups.length >= limit;
 }
+function getStudentLimit() {
+  const status = getSubStatus();
+  const plans = state.subscription?.plans || {};
+  const key = status.state === 'expired' ? 'free' : status.plan;
+  const limit = plans[key]?.maxStudents;
+  return typeof limit === 'number' ? limit : 0; // 0 = cheksiz
+}
+function atStudentLimit(groupId) {
+  const limit = getStudentLimit();
+  if (!limit) return false;
+  return state.students.filter(s => s.groupId === groupId).length >= limit;
+}
 
 function hasUnreadNotifications() {
   const seenCount = parseInt(localStorage.getItem('notif-seenCount') || '0');
@@ -240,6 +277,7 @@ function topbar() {
     <div class="brandwrap">${sealSVG(34)}<div class="brand">TUGARAK<span>+</span></div></div>
     <div class="topbar-right">
       ${langSwitcherHTML(false)}
+      ${deferredInstallPrompt ? `<button class="btn btn-outline" id="installBtn" style="padding:6px 12px;font-size:12px;">\u{1F4F2} ${t('installApp')}</button>` : ''}
       <button class="theme-toggle" id="themeToggle" aria-label="Tun/kun rejimi"></button>
       ${state.firebaseUser ? `<button class="logout-btn" id="notifBell" style="position:relative;font-size:16px;line-height:1;">\u{1F514}${unread ? '<span style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:var(--danger);"></span>' : ''}</button>
       <button class="userchip" id="profileBtn" style="border:none;background:transparent;cursor:pointer;padding:0;"><div class="avatar-sm">${esc((who || '?').slice(0, 1).toUpperCase())}</div><span>${esc(who || '')}</span></button>
@@ -251,12 +289,14 @@ function topbar() {
 function renderShell(inner, activeView) {
   const role = state.role;
   const nav = role === 'admin'
-    ? [['adminDash', '\u{1F5C2}', t('navApprovals')], ['adminNotifications', '\u{1F4E2}', t('navNotifications')], ['adminSubscription', '\u{1F4B3}', t('navSubscription')]]
+    ? [['adminDash', '\u{1F5C2}', t('navApprovals')], ['adminNotifications', '\u{1F4E2}', t('navNotifications')], ['adminSubscription', '\u{1F4B3}', t('navSubscription')], ['adminAds', '\u{1F4E3}', t('navAds')]]
     : [['teacherDash', '\u{1F3E0}', t('navTeacher')], ['subscription', '\u{1F4B3}', t('navSubscription')]];
   const navBtn = (v, ic, l, cls) => `<button class="${v === activeView ? 'active' : ''}" data-navto="${v}">${cls === 'bottom' ? `${ic}<span>${l}</span>` : `${ic} ${l}`}</button>`;
   return `${topbar()}
   <div class="shell">
-    <div class="sidebar no-print">${nav.map(([v, ic, l]) => navBtn(v, ic, l)).join('')}</div>
+    <div class="sidebar no-print">${nav.map(([v, ic, l]) => navBtn(v, ic, l)).join('')}
+      ${role === 'teacher' ? renderAdBannerHTML(state.ad) : ''}
+    </div>
     <div class="main">${inner}</div>
   </div>
   <div class="bottomnav no-print">${nav.map(([v, ic, l]) => navBtn(v, ic, l, 'bottom')).join('')}</div>
@@ -505,6 +545,41 @@ function renderAdminSubscriptionView() {
   return `${renderSubscriptionAdminCard()}${renderSubscriptionRequestsCard()}`;
 }
 
+function renderAdminAdsView() {
+  const ad = state.ad || {};
+  return `<div class="card">
+    <h2>${t('adsAdminTitle')}</h2>
+    <div class="muted">${t('adsAdminDesc')}</div>
+    <div class="divider"></div>
+    <label class="check-row" style="margin-top:0;"><input type="checkbox" id="adEnabled" ${ad.enabled ? 'checked' : ''}> <span>${t('adsEnableToggle')}</span></label>
+    <label>${t('adsTitleLabel')}</label><input type="text" id="adTitle" value="${esc(ad.title || '')}" placeholder="${t('adsTitlePh')}">
+    <label>${t('adsTextLabel')}</label>
+    <textarea id="adText" rows="3" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:14px;font-family:inherit;" placeholder="${t('adsTextPh')}">${esc(ad.text || '')}</textarea>
+    <label>${t('adsLinkLabel')}</label><input type="text" id="adLink" value="${esc(ad.link || '')}" placeholder="${t('adsLinkPh')}">
+    <label>${t('adsImageLabel')}</label>
+    <div class="upload-drop" id="adImageDropZone" style="margin-top:6px;">
+      <input type="file" id="adImageInput" accept="image/*" style="display:none;">${t('mPickPhoto')}
+    </div>
+    <div id="adImagePreviewWrap">${ad.image ? `<img src="${ad.image}" style="width:100%;max-width:260px;border-radius:8px;margin-top:10px;border:1px solid var(--line);">` : ''}</div>
+    <button class="btn btn-teal" id="saveAdBtn" style="margin-top:16px;">${t('adsSave')}</button>
+  </div>
+  <div class="card">
+    <h3 style="margin:0 0 10px;font-size:14px;">${t('adsPreview')}</h3>
+    ${renderAdBannerHTML(ad)}
+  </div>`;
+}
+
+function renderAdBannerHTML(ad) {
+  if (!ad || !ad.enabled || (!ad.title && !ad.text)) return '';
+  return `<div style="background:var(--paper-2);border:1px solid var(--line);border-radius:12px;padding:14px;margin-top:12px;">
+    <div style="font-size:10px;font-weight:800;letter-spacing:.6px;color:var(--ink-soft);margin-bottom:6px;">${t('adsBannerLabel')}</div>
+    ${ad.image ? `<img src="${ad.image}" style="width:100%;border-radius:8px;margin-bottom:8px;">` : ''}
+    ${ad.title ? `<div style="font-weight:700;font-size:13.5px;margin-bottom:4px;">${esc(ad.title)}</div>` : ''}
+    ${ad.text ? `<div class="muted" style="font-size:12.5px;">${esc(ad.text)}</div>` : ''}
+    ${ad.link ? `<a href="${esc(ad.link)}" target="_blank" rel="noopener" class="link-btn" style="display:inline-block;margin-top:8px;font-size:12px;">${t('adsMore')} \u2192</a>` : ''}
+  </div>`;
+}
+
 function renderSubscriptionAdminCard() {
   const sub = state.subscription || {};
   const plans = sub.plans || {};
@@ -515,6 +590,7 @@ function renderSubscriptionAdminCard() {
       <label>${t('subPriceLabel')}</label><input type="text" inputmode="numeric" id="subPrice_${key}" value="${p.price || 0}">
       <label>${t('subDiscountLabel')}</label><input type="text" inputmode="numeric" id="subDiscount_${key}" value="${p.discount || 0}">
       <label>${t('subMaxGroupsLabel')}</label><input type="text" inputmode="numeric" id="subMaxGroups_${key}" value="${p.maxGroups ?? 0}">
+      <label>${t('subMaxStudentsLabel')}</label><input type="text" inputmode="numeric" id="subMaxStudents_${key}" value="${p.maxStudents ?? 0}">
       <label>${t('subFeaturesLabel')}</label>
       <textarea id="subFeatures_${key}" rows="4" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:13px;font-family:inherit;">${esc((p.features || []).join('\n'))}</textarea>
     </div>`;
@@ -649,9 +725,12 @@ function renderGroupPanel(group) {
         <button class="btn btn-outline" id="addManualBtn" ${locked ? 'disabled' : ''}>${t('addManualBtn')}</button>
         <button class="btn btn-outline" id="addPhotoBtn" ${locked ? 'disabled' : ''}>${t('addPhotoBtn')}</button>
         <button class="btn btn-outline" id="bulkImportBtn" ${locked ? 'disabled' : ''}>${t('bulkImportBtn')}</button>
+        <button class="btn btn-outline" id="docsBtn">${t('docsBtn')}</button>
         <button class="btn btn-outline" id="quarterlyBtn">${t('quarterlyBtn')}</button>
         <button class="btn btn-outline" id="excelExportBtn" ${locked ? 'disabled' : ''}>${t('exportExcelBtn')}</button>
         <button class="btn btn-primary" id="printBtn" ${locked ? 'disabled' : ''}>${t('exportPrintBtn')}</button>
+        <button class="btn btn-outline" id="editGroupBtn">${t('editGroupBtn')}</button>
+        <button class="btn btn-danger" id="deleteGroupBtn">${t('deleteGroupBtn')}</button>
       </div>
     </div>
     ${locked ? `<div class="error-box" style="margin-top:12px;"><b>${t('groupLockedTitle')}</b><br>${t('groupLockedMsg')} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>` : ''}
@@ -818,6 +897,51 @@ function renderModal() {
         <button class="btn btn-teal block" id="profileSaveBtn">${t('profileSave')}</button>
       </div></div></div>`;
   }
+  if (m.type === 'editGroup') {
+    const g = state.groups.find(x => x.id === m.groupId);
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:420px;">
+      <h2>${t('editGroupTitle')}</h2>
+      <label>${t('mGroupNameLabel')}</label><input type="text" id="egName" value="${esc(g?.name || '')}">
+      <label>${t('mSubjectLabel')}</label><input type="text" id="egSubject" value="${esc(g?.subject || '')}">
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="egSave">${t('profileSave')}</button>
+      </div></div></div>`;
+  }
+  if (m.type === 'deleteGroupConfirm') {
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:400px;">
+      <h2>${t('deleteGroupConfirmTitle')}</h2>
+      <div class="error-box">${t('deleteGroupConfirmMsg')}</div>
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-danger block" id="deleteGroupConfirmBtn">${t('deleteConfirmBtn')}</button>
+      </div></div></div>`;
+  }
+  if (m.type === 'groupDocs') {
+    const cats = { workplan: t('docCategoryWorkPlan'), lesson: t('docCategoryLesson') };
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:520px;">
+      <h2>${t('docsTitle')}</h2>
+      <div class="muted">${t('docsDesc')}</div>
+      <div class="divider"></div>
+      ${state.groupDocs.length === 0 ? `<div class="empty">${t('docEmpty')}</div>` :
+        state.groupDocs.map(d => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);">
+          <div><span class="tag-subject">${cats[d.category] || d.category}</span> <b>${esc(d.title)}</b><br><a href="${d.fileData}" download="${esc(d.fileName)}" class="muted" style="font-size:12px;">\u{1F4CE} ${esc(d.fileName)}</a></div>
+          <button class="link-btn" data-deldoc="${d.id}" style="color:var(--danger);">${t('docDelete')}</button>
+        </div>`).join('')}
+      <div class="divider"></div>
+      <label>${t('docCategoryLabel')}</label>
+      <select id="docCategory"><option value="workplan">${t('docCategoryWorkPlan')}</option><option value="lesson">${t('docCategoryLesson')}</option></select>
+      <label>${t('docTitleLabel')}</label><input type="text" id="docTitle" placeholder="${t('docTitlePh')}">
+      <label>${t('docFileLabel')}</label>
+      <div class="upload-drop" id="docDropZone" style="margin-top:6px;">
+        <input type="file" id="docFileInput" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" style="display:none;">${t('mPickFile')}
+      </div>
+      <div id="docFileNameWrap" class="muted" style="margin-top:6px;font-size:12px;"></div>
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('mClose')}</button>
+        <button class="btn btn-teal block" id="docUploadBtn">${t('docUploadBtn')}</button>
+      </div></div></div>`;
+  }
   return '';
 }
 
@@ -868,6 +992,13 @@ function attachHandlers() {
   document.getElementById('themeToggle')?.addEventListener('click', () => {
     state.theme = state.theme === 'dark' ? 'light' : 'dark';
     localStorage.setItem('theme', state.theme);
+    render();
+  });
+  document.getElementById('installBtn')?.addEventListener('click', async () => {
+    if (!deferredInstallPrompt) return;
+    deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
     render();
   });
   document.querySelectorAll('[data-lang]').forEach(el => el.addEventListener('click', () => {
@@ -1014,6 +1145,7 @@ function attachHandlers() {
       price: parseInt(document.getElementById(`subPrice_${key}`).value) || 0,
       discount: parseInt(document.getElementById(`subDiscount_${key}`).value) || 0,
       maxGroups: parseInt(document.getElementById(`subMaxGroups_${key}`).value) || 0,
+      maxStudents: parseInt(document.getElementById(`subMaxStudents_${key}`).value) || 0,
       features: document.getElementById(`subFeatures_${key}`).value.split('\n').map(s => s.trim()).filter(Boolean),
     });
     const data = {
@@ -1090,11 +1222,14 @@ function attachHandlers() {
     state.modal = { type: 'newGroup' }; render();
   });
   document.querySelectorAll('[data-selectgroup]').forEach(el => el.addEventListener('click', () => {
-    state.activeGroupId = el.dataset.selectgroup; subscribeStudentsIfNeeded(); render();
+    state.activeGroupId = el.dataset.selectgroup; subscribeStudentsIfNeeded(); subscribeGroupDocsIfNeeded(); render();
   }));
   document.getElementById('addManualBtn')?.addEventListener('click', () => { state.modal = { type: 'addManual' }; render(); });
   document.getElementById('addPhotoBtn')?.addEventListener('click', () => { state.modal = { type: 'addPhoto' }; render(); });
   document.getElementById('bulkImportBtn')?.addEventListener('click', () => { state.modal = { type: 'bulkImport' }; render(); });
+  document.getElementById('docsBtn')?.addEventListener('click', () => { state.modal = { type: 'groupDocs' }; render(); });
+  document.getElementById('editGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'editGroup', groupId: state.activeGroupId }; render(); });
+  document.getElementById('deleteGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'deleteGroupConfirm', groupId: state.activeGroupId }; render(); });
   document.getElementById('quarterlyBtn')?.addEventListener('click', () => { state.modal = { type: 'quarterly', groupId: state.activeGroupId }; render(); });
   document.getElementById('printBtn')?.addEventListener('click', () => window.print());
   document.getElementById('excelExportBtn')?.addEventListener('click', () => exportGroupToExcel());
@@ -1111,11 +1246,12 @@ function attachHandlers() {
     const subject = document.getElementById('ngSubject').value.trim();
     if (!name || !subject) { toast(t('toastFillAllFields'), 'error'); return; }
     const gid = await createGroup(state.firebaseUser.uid, name, subject);
-    state.activeGroupId = gid; subscribeStudentsIfNeeded();
+    state.activeGroupId = gid; subscribeStudentsIfNeeded(); subscribeGroupDocsIfNeeded();
     state.modal = null; render();
   });
 
   document.getElementById('amSave')?.addEventListener('click', async () => {
+    if (atStudentLimit(state.activeGroupId)) { toast(t('studentLimitReachedMsg'), 'error'); return; }
     const name = document.getElementById('amName').value.trim();
     const cls = document.getElementById('amClass').value.trim();
     if (!name) { toast(t('toastEnterName'), 'error'); return; }
@@ -1135,6 +1271,7 @@ function attachHandlers() {
     } catch (err) { toast(t('toastPhotoError'), 'error'); zone.textContent = t('mPickPhoto'); }
   });
   document.getElementById('apSave')?.addEventListener('click', async () => {
+    if (atStudentLimit(state.activeGroupId)) { toast(t('studentLimitReachedMsg'), 'error'); return; }
     const name = document.getElementById('apName').value.trim();
     const cls = document.getElementById('apClass').value.trim();
     if (!name) { toast(t('toastEnterName'), 'error'); return; }
@@ -1176,8 +1313,15 @@ function attachHandlers() {
   document.getElementById('bulkSave')?.addEventListener('click', async () => {
     const cls = document.getElementById('bulkClass').value.trim();
     const raw = document.getElementById('bulkNamesArea').value;
-    const names = raw.split('\n').map(s => s.trim()).filter(Boolean);
+    let names = raw.split('\n').map(s => s.trim()).filter(Boolean);
     if (!names.length) { toast(t('toastEnterOneName'), 'error'); return; }
+    const limit = getStudentLimit();
+    if (limit) {
+      const already = state.students.filter(s => s.groupId === state.activeGroupId).length;
+      const room = Math.max(0, limit - already);
+      if (room === 0) { toast(t('studentLimitReachedMsg'), 'error'); return; }
+      if (names.length > room) { names = names.slice(0, room); toast(t('studentLimitReachedMsg'), 'error'); }
+    }
     const btn = document.getElementById('bulkSave'); btn.disabled = true; btn.textContent = t('toastAdding');
     try {
       for (const name of names) {
@@ -1190,7 +1334,84 @@ function attachHandlers() {
       btn.disabled = false; btn.textContent = t('mBulkAddAll');
     }
   });
+
+  /* Guruhni tahrirlash / o'chirish */
+  document.getElementById('egSave')?.addEventListener('click', async () => {
+    const name = document.getElementById('egName').value.trim();
+    const subject = document.getElementById('egSubject').value.trim();
+    if (!name || !subject) { toast(t('toastFillAllFields'), 'error'); return; }
+    try {
+      await updateGroup(state.modal.groupId, { name, subject });
+      toast(t('groupUpdated'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+  document.getElementById('deleteGroupConfirmBtn')?.addEventListener('click', async () => {
+    const gid = state.modal.groupId;
+    try {
+      await deleteGroup(gid);
+      if (state.activeGroupId === gid) state.activeGroupId = null;
+      toast(t('groupDeleted'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+
+  /* Ish reja / dars ishlanmasi hujjatlari */
+  let selectedDocBase64 = null, selectedDocName = '';
+  document.getElementById('docDropZone')?.addEventListener('click', () => document.getElementById('docFileInput').click());
+  document.getElementById('docFileInput')?.addEventListener('change', (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    if (file.size > 700 * 1024) { toast(t('docTooLarge'), 'error'); return; }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      selectedDocBase64 = ev.target.result;
+      selectedDocName = file.name;
+      document.getElementById('docFileNameWrap').textContent = `\u{1F4CE} ${file.name}`;
+    };
+    reader.readAsDataURL(file);
+  });
+  document.getElementById('docUploadBtn')?.addEventListener('click', async () => {
+    const title = document.getElementById('docTitle').value.trim();
+    const category = document.getElementById('docCategory').value;
+    if (!title) { toast(t('toastFillAllFields'), 'error'); return; }
+    if (!selectedDocBase64) { toast(t('toastFillAllFields'), 'error'); return; }
+    try {
+      await addGroupDoc(state.firebaseUser.uid, state.activeGroupId, {
+        title, category, fileName: selectedDocName, fileData: selectedDocBase64
+      });
+      selectedDocBase64 = null; selectedDocName = '';
+      toast(t('docUploaded'), 'info');
+      render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+  document.querySelectorAll('[data-deldoc]').forEach(el => el.addEventListener('click', async () => {
+    try { await deleteGroupDoc(el.dataset.deldoc); toast(t('docDeleted'), 'info'); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+  }));
+
+  /* Reklama (admin) */
+  let selectedAdImageBase64 = null;
+  document.getElementById('adImageDropZone')?.addEventListener('click', () => document.getElementById('adImageInput').click());
+  document.getElementById('adImageInput')?.addEventListener('change', async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    try {
+      selectedAdImageBase64 = await fileToCompressedBase64(file, 640, 0.7);
+      document.getElementById('adImagePreviewWrap').innerHTML = `<img src="${selectedAdImageBase64}" style="width:100%;max-width:260px;border-radius:8px;margin-top:10px;border:1px solid var(--line);">`;
+    } catch (err) { toast(t('toastPhotoError'), 'error'); }
+  });
+  document.getElementById('saveAdBtn')?.addEventListener('click', async () => {
+    const data = {
+      enabled: document.getElementById('adEnabled').checked,
+      title: document.getElementById('adTitle').value.trim(),
+      text: document.getElementById('adText').value.trim(),
+      link: document.getElementById('adLink').value.trim(),
+      image: selectedAdImageBase64 || state.ad?.image || null,
+    };
+    try { await saveAd(data); toast(t('adsSaved'), 'info'); render(); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+  });
 }
+
 
 function exportGroupToExcel() {
   const group = state.groups.find(g => g.id === state.activeGroupId);
