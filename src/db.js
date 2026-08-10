@@ -102,7 +102,10 @@ export async function saveSubscriptionSettings(data) {
   await setDoc(doc(db, 'settings', 'subscription'), data, { merge: true });
 }
 export async function chooseSubscriptionPlan(uid, planKey) {
-  await updateDoc(doc(db, 'users', uid), { selectedPlan: planKey });
+  await updateDoc(doc(db, 'users', uid), { selectedPlan: planKey, planContacted: false, planChosenAt: serverTimestamp() });
+}
+export async function markPlanContacted(uid) {
+  await updateDoc(doc(db, 'users', uid), { planContacted: true });
 }
 
 /* ---------- admin bootstrap helper (run once manually, see README) ---------- */
