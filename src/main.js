@@ -8,7 +8,7 @@ import {
   watchGroupStudents, addStudent, deleteStudent, addGrade,
   watchNotifications, createNotification,
   rejectTeacher, resubmitApplication, updateTeacherProfile,
-  watchSubscriptionSettings, saveSubscriptionSettings, chooseSubscriptionPlan
+  watchSubscriptionSettings, saveSubscriptionSettings, chooseSubscriptionPlan, markPlanContacted
 } from './db.js';
 import { auth } from './firebase.js';
 import { parseRosterFile } from './importParsers.js';
@@ -419,6 +419,7 @@ function renderAdminDash() {
   </div>
 
   ${renderSubscriptionAdminCard()}
+  ${renderSubscriptionRequestsCard()}
 
   <div class="card">
     <h2>${t('notifSectionTitle')}</h2>
@@ -488,28 +489,51 @@ function renderSubscriptionAdminCard() {
   </div>`;
 }
 
+/* ---------- OBUNA SO'ROVLARI (admin ko'rinishi) ---------- */
+function renderSubscriptionRequestsCard() {
+  const planLabels = { free: 'subFree', monthly: 'subMonthly', yearly: 'subYearly' };
+  const requests = state.teachers.filter(tc => tc.selectedPlan);
+  return `<div class="card">
+    <h2>${t('subRequestsTitle')}</h2>
+    <div class="muted">${t('subRequestsDesc')}</div>
+    <div class="divider"></div>
+    ${requests.length === 0 ? `<div class="empty">${t('subRequestsEmpty')}</div>` :
+      requests.map(tc => `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;padding:12px 0;border-bottom:1px solid var(--line);">
+        <div>
+          <b>${esc(tc.fullName)}</b> <span class="tag-subject">${t(planLabels[tc.selectedPlan] || 'subFree')}</span>
+          <span class="pill ${tc.planContacted ? 'approved' : 'pending'}">${tc.planContacted ? t('subRequestContacted') : t('subRequestNew')}</span><br>
+          <span class="muted">${esc(tc.email)} \u00B7 ${esc(tc.phone || '')}</span>
+        </div>
+        ${!tc.planContacted ? `<button class="btn btn-outline" data-markcontacted="${tc.id}">${t('subMarkContacted')}</button>` : ''}
+      </div>`).join('')}
+  </div>`;
+}
+
 /* ---------- OBUNA: o'qituvchi ko'rinishi ---------- */
 function renderSubscriptionView() {
   const sub = state.subscription || {};
   const plans = sub.plans || {};
   const myPlan = state.userDoc?.selectedPlan;
   const fmt = (n) => Number(n || 0).toLocaleString();
-  const planCard = (key, labelKey, priceSuffix) => {
+  const ICONS = { free: '\u{1F331}', monthly: '\u2B50', yearly: '\u{1F451}' };
+  const planCard = (key, labelKey) => {
     const p = plans[key] || { price: 0, discount: 0, features: [] };
     const finalPrice = p.discount ? Math.round(p.price * (1 - p.discount / 100)) : p.price;
     const isCurrent = myPlan === key;
-    return `<div class="card" style="text-align:center;${isCurrent ? 'border-color:var(--teal);box-shadow:0 0 0 2px var(--teal);' : ''}">
-      <h3 style="margin:0 0 6px;font-size:17px;">${t(labelKey)}</h3>
+    return `<div class="plan-card plan-${key}" style="${isCurrent ? 'box-shadow:0 0 0 3px var(--teal);' : ''}">
+      ${key === 'yearly' ? `<div class="plan-badge">\u2728 ${t('subBestValue')}</div>` : ''}
+      <div class="plan-icon">${ICONS[key]}</div>
+      <h3 style="margin:0 0 6px;font-size:18px;">${t(labelKey)}</h3>
       ${p.discount ? `<div class="muted" style="text-decoration:line-through;">${fmt(p.price)}</div>` : ''}
-      <div style="font-family:'Fraunces',serif;font-size:28px;font-weight:600;color:var(--navy);margin:4px 0;">
+      <div class="plan-price">
         ${key === 'free' ? t('subFree') : fmt(finalPrice)}
-        ${key !== 'free' ? `<span style="font-size:13px;color:var(--ink-soft);">${key === 'monthly' ? t('subPricePerMonth') : t('subPricePerYear')}</span>` : ''}
+        ${key !== 'free' ? `<span style="font-size:13px;color:var(--ink-soft);font-weight:600;">${key === 'monthly' ? t('subPricePerMonth') : t('subPricePerYear')}</span>` : ''}
       </div>
-      ${p.discount ? `<div class="pill approved" style="margin-bottom:10px;">-${p.discount}% ${t('subDiscount')}</div>` : '<div style="height:26px;"></div>'}
-      <ul style="text-align:left;list-style:none;padding:0;margin:12px 0;font-size:13.5px;">
-        ${(p.features || []).map(f => `<li style="padding:5px 0;border-top:1px solid var(--line);">\u2705 ${esc(f)}</li>`).join('')}
+      ${p.discount ? `<div class="pill approved">-${p.discount}% ${t('subDiscount')}</div>` : '<div style="height:24px;"></div>'}
+      <ul class="plan-features">
+        ${(p.features || []).map(f => `<li><span>\u2705</span><span>${esc(f)}</span></li>`).join('') || `<li class="muted">\u2014</li>`}
       </ul>
-      ${isCurrent ? `<div class="pill approved">${t('subCurrent')}</div>` : `<button class="btn ${key === 'monthly' ? 'btn-teal' : 'btn-outline'} block" data-chooseplan="${key}">${t('subChoose')}</button>`}
+      ${isCurrent ? `<div class="pill approved">${t('subCurrent')}</div>` : `<button class="btn ${key === 'yearly' ? 'btn-primary' : key === 'monthly' ? 'btn-teal' : 'btn-outline'} block" data-chooseplan="${key}">${t('subChoose')}</button>`}
     </div>`;
   };
   return `
@@ -520,8 +544,8 @@ function renderSubscriptionView() {
   </div>
   <div class="plan-grid">
     ${planCard('free', 'subFree')}
-    ${planCard('monthly', 'subMonthly', t('subPricePerMonth'))}
-    ${planCard('yearly', 'subYearly', t('subPricePerYear'))}
+    ${planCard('monthly', 'subMonthly')}
+    ${planCard('yearly', 'subYearly')}
   </div>`;
 }
 
@@ -931,6 +955,10 @@ function attachHandlers() {
     try { await saveSubscriptionSettings(data); toast(t('subPlansSaved'), 'info'); }
     catch (err) { toast(friendlyError(err), 'error'); }
   });
+  document.querySelectorAll('[data-markcontacted]').forEach(el => el.addEventListener('click', async () => {
+    try { await markPlanContacted(el.dataset.markcontacted); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+  }));
 
   /* Resubmit (rad etilgandan keyin qayta yuborish) */
   document.getElementById('openResubmitBtn')?.addEventListener('click', () => { state.modal = { type: 'resubmit' }; render(); });
