@@ -188,4 +188,5 @@ tr:hover td{background:var(--paper-2);}
   .topbar,.sidebar,.bottomnav,.no-print{display:none !important;}
   body{background:#fff; color:#000;}
   .main{max-width:100%; padding:0;}
+  .jurnal-header{display:block !important;}
 }
