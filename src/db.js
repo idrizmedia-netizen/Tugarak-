@@ -1,6 +1,6 @@
 import {
   collection, doc, addDoc, updateDoc, deleteDoc, getDocs, getDoc, setDoc,
-  query, where, orderBy, onSnapshot, serverTimestamp, arrayUnion
+  query, where, orderBy, onSnapshot, serverTimestamp, arrayUnion, Timestamp
 } from 'firebase/firestore';
 import { db } from './firebase.js';
 
@@ -88,9 +88,9 @@ export async function createNotification(title, message) {
 const DEFAULT_PLANS = {
   enabled: false,
   plans: {
-    free: { price: 0, discount: 0, features: ["1 ta guruh", "20 tagacha o'quvchi", "Asosiy hisobotlar"] },
-    monthly: { price: 49000, discount: 0, features: ["Cheksiz guruh", "Cheksiz o'quvchi", "Excel eksport", "Bildirishnomalar"] },
-    yearly: { price: 490000, discount: 15, features: ["Cheksiz guruh", "Cheksiz o'quvchi", "Excel eksport", "Bildirishnomalar", "Ustuvor yordam"] },
+    free: { price: 0, discount: 0, maxGroups: 1, features: ["1 ta guruh", "20 tagacha o'quvchi", "Asosiy hisobotlar"] },
+    monthly: { price: 49000, discount: 0, maxGroups: 0, features: ["Cheksiz guruh", "Cheksiz o'quvchi", "Excel eksport", "Bildirishnomalar"] },
+    yearly: { price: 490000, discount: 15, maxGroups: 0, features: ["Cheksiz guruh", "Cheksiz o'quvchi", "Excel eksport", "Bildirishnomalar", "Ustuvor yordam"] },
   }
 };
 export function watchSubscriptionSettings(callback) {
@@ -106,6 +106,18 @@ export async function chooseSubscriptionPlan(uid, planKey) {
 }
 export async function markPlanContacted(uid) {
   await updateDoc(doc(db, 'users', uid), { planContacted: true });
+}
+export async function activateSubscription(uid, planKey) {
+  const now = Date.now();
+  let expiresAt = null;
+  if (planKey === 'monthly') expiresAt = Timestamp.fromMillis(now + 30 * 24 * 60 * 60 * 1000);
+  else if (planKey === 'yearly') expiresAt = Timestamp.fromMillis(now + 365 * 24 * 60 * 60 * 1000);
+  await updateDoc(doc(db, 'users', uid), {
+    plan: planKey,
+    planActivatedAt: serverTimestamp(),
+    planExpiresAt: expiresAt,
+    planContacted: true,
+  });
 }
 
 /* ---------- admin bootstrap helper (run once manually, see README) ---------- */
