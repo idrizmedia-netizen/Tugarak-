@@ -9,7 +9,7 @@ import {
   watchNotifications, createNotification,
   rejectTeacher, resubmitApplication, updateTeacherProfile,
   watchSubscriptionSettings, saveSubscriptionSettings, chooseSubscriptionPlan, markPlanContacted,
-  activateSubscription, watchAd, saveAd,
+  activateSubscription, watchAds, addAd, updateAd, deleteAd,
   watchGroupDocs, addGroupDoc, deleteGroupDoc
 } from './db.js';
 import { auth } from './firebase.js';
@@ -58,10 +58,12 @@ let state = {
   subscription: { enabled: false, plans: { free: { price: 0, discount: 0, features: [] }, monthly: { price: 0, discount: 0, features: [] }, yearly: { price: 0, discount: 0, features: [] } } },
   profileForm: { name: '', phone: '' },
   ad: { enabled: false, title: '', text: '', link: '', image: null },
+  ads: [],
+  adDismissed: false,
   groupDocs: [],
 };
 
-let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAd = null, unsubGroupDocs = null;
+let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubGroupDocs = null;
 const uid = () => 'x' + Math.random().toString(36).slice(2, 9);
 
 function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -105,7 +107,7 @@ watchAuth(async (user) => {
   if (unsubStudents) { unsubStudents(); unsubStudents = null; }
   if (unsubNotifications) { unsubNotifications(); unsubNotifications = null; }
   if (unsubSubscription) { unsubSubscription(); unsubSubscription = null; }
-  if (unsubAd) { unsubAd(); unsubAd = null; }
+  if (unsubAds) { unsubAds(); unsubAds = null; }
   if (unsubGroupDocs) { unsubGroupDocs(); unsubGroupDocs = null; }
 
   if (!user) {
@@ -120,7 +122,7 @@ watchAuth(async (user) => {
   // bildirishnomalarni, obuna sozlamalarini va reklamani ko'ra oladi.
   unsubNotifications = watchNotifications(list => { state.notifications = list; render(); });
   unsubSubscription = watchSubscriptionSettings(sub => { state.subscription = sub; render(); });
-  unsubAd = watchAd(ad => { state.ad = ad; render(); });
+  unsubAds = watchAds(list => { state.ads = list; render(); });
 
   const admin = await isAdmin(user.uid, user.email);
   if (admin) {
@@ -292,10 +294,9 @@ function renderShell(inner, activeView) {
     ? [['adminDash', '\u{1F5C2}', t('navApprovals')], ['adminNotifications', '\u{1F4E2}', t('navNotifications')], ['adminSubscription', '\u{1F4B3}', t('navSubscription')], ['adminAds', '\u{1F4E3}', t('navAds')]]
     : [['teacherDash', '\u{1F3E0}', t('navTeacher')], ['subscription', '\u{1F4B3}', t('navSubscription')]];
   const navBtn = (v, ic, l, cls) => `<button class="${v === activeView ? 'active' : ''}" data-navto="${v}">${cls === 'bottom' ? `${ic}<span>${l}</span>` : `${ic} ${l}`}</button>`;
-  return `${topbar()}
+  return `${renderTopAdCarousel()}${topbar()}
   <div class="shell">
     <div class="sidebar no-print">${nav.map(([v, ic, l]) => navBtn(v, ic, l)).join('')}
-      ${role === 'teacher' ? renderAdBannerHTML(state.ad) : ''}
     </div>
     <div class="main">${inner}</div>
   </div>
@@ -546,37 +547,52 @@ function renderAdminSubscriptionView() {
 }
 
 function renderAdminAdsView() {
-  const ad = state.ad || {};
   return `<div class="card">
     <h2>${t('adsAdminTitle')}</h2>
     <div class="muted">${t('adsAdminDesc')}</div>
     <div class="divider"></div>
-    <label class="check-row" style="margin-top:0;"><input type="checkbox" id="adEnabled" ${ad.enabled ? 'checked' : ''}> <span>${t('adsEnableToggle')}</span></label>
-    <label>${t('adsTitleLabel')}</label><input type="text" id="adTitle" value="${esc(ad.title || '')}" placeholder="${t('adsTitlePh')}">
+    <label>${t('adsTitleLabel')}</label><input type="text" id="adTitle" placeholder="${t('adsTitlePh')}">
     <label>${t('adsTextLabel')}</label>
-    <textarea id="adText" rows="3" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:14px;font-family:inherit;" placeholder="${t('adsTextPh')}">${esc(ad.text || '')}</textarea>
-    <label>${t('adsLinkLabel')}</label><input type="text" id="adLink" value="${esc(ad.link || '')}" placeholder="${t('adsLinkPh')}">
+    <textarea id="adText" rows="2" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:14px;font-family:inherit;" placeholder="${t('adsTextPh')}"></textarea>
+    <label>${t('adsLinkLabel')}</label><input type="text" id="adLink" placeholder="${t('adsLinkPh')}">
     <label>${t('adsImageLabel')}</label>
     <div class="upload-drop" id="adImageDropZone" style="margin-top:6px;">
       <input type="file" id="adImageInput" accept="image/*" style="display:none;">${t('mPickPhoto')}
     </div>
-    <div id="adImagePreviewWrap">${ad.image ? `<img src="${ad.image}" style="width:100%;max-width:260px;border-radius:8px;margin-top:10px;border:1px solid var(--line);">` : ''}</div>
+    <div id="adImagePreviewWrap"></div>
     <button class="btn btn-teal" id="saveAdBtn" style="margin-top:16px;">${t('adsSave')}</button>
   </div>
   <div class="card">
     <h3 style="margin:0 0 10px;font-size:14px;">${t('adsPreview')}</h3>
-    ${renderAdBannerHTML(ad)}
+    ${state.ads.length === 0 ? `<div class="empty">${t('docEmpty')}</div>` :
+      state.ads.map(ad => `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);">
+        <div style="display:flex;align-items:center;gap:10px;">
+          ${ad.image ? `<img src="${ad.image}" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--line);">` : ''}
+          <div><b>${esc(ad.title || '')}</b><br><span class="muted" style="font-size:12px;">${esc((ad.text || '').slice(0, 60))}</span></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <label class="check-row" style="margin:0;"><input type="checkbox" data-toggle-ad="${ad.id}" ${ad.enabled ? 'checked' : ''}> <span style="font-size:12px;">${t('adsEnableToggle')}</span></label>
+          <button class="link-btn" data-delad="${ad.id}" style="color:var(--danger);">${t('docDelete')}</button>
+        </div>
+      </div>`).join('')}
   </div>`;
 }
 
-function renderAdBannerHTML(ad) {
-  if (!ad || !ad.enabled || (!ad.title && !ad.text)) return '';
-  return `<div style="background:var(--paper-2);border:1px solid var(--line);border-radius:12px;padding:14px;margin-top:12px;">
-    <div style="font-size:10px;font-weight:800;letter-spacing:.6px;color:var(--ink-soft);margin-bottom:6px;">${t('adsBannerLabel')}</div>
-    ${ad.image ? `<img src="${ad.image}" style="width:100%;border-radius:8px;margin-bottom:8px;">` : ''}
-    ${ad.title ? `<div style="font-weight:700;font-size:13.5px;margin-bottom:4px;">${esc(ad.title)}</div>` : ''}
-    ${ad.text ? `<div class="muted" style="font-size:12.5px;">${esc(ad.text)}</div>` : ''}
-    ${ad.link ? `<a href="${esc(ad.link)}" target="_blank" rel="noopener" class="link-btn" style="display:inline-block;margin-top:8px;font-size:12px;">${t('adsMore')} \u2192</a>` : ''}
+function renderTopAdCarousel() {
+  const active = (state.ads || []).filter(a => a.enabled);
+  if (!active.length || state.adDismissed) return '';
+  return `<div class="ad-carousel no-print" id="adCarousel">
+    <button class="ad-carousel-close" id="adCarouselClose" aria-label="Yopish">\u2715</button>
+    <div class="ad-carousel-track" id="adBannerTrack">
+      ${active.map(ad => `<a class="ad-slide" href="${ad.link ? esc(ad.link) : '#'}" target="${ad.link ? '_blank' : '_self'}" rel="noopener" style="${ad.image ? `background-image:url('${ad.image}');` : ''}">
+        <div class="ad-slide-overlay">
+          <span class="ad-slide-label">${t('adsBannerLabel')}</span>
+          <div class="ad-slide-title">${esc(ad.title || '')}</div>
+          <div class="ad-slide-text">${esc(ad.text || '')}</div>
+        </div>
+      </a>`).join('')}
+    </div>
+    ${active.length > 1 ? `<div class="ad-dots">${active.map((_, i) => `<span class="ad-dot ${i === 0 ? 'active' : ''}"></span>`).join('')}</div>` : ''}
   </div>`;
 }
 
@@ -1349,11 +1365,20 @@ function attachHandlers() {
   document.getElementById('deleteGroupConfirmBtn')?.addEventListener('click', async () => {
     const gid = state.modal.groupId;
     try {
+      // O'chirishdan oldin shu guruhga tegishli faol tinglovchilarni to'xtatamiz
+      // (aks holda o'chirilgan hujjatga onSnapshot xato berishi mumkin).
+      if (state.activeGroupId === gid) {
+        if (unsubStudents) { unsubStudents(); unsubStudents = null; }
+        if (unsubGroupDocs) { unsubGroupDocs(); unsubGroupDocs = null; }
+      }
       await deleteGroup(gid);
       if (state.activeGroupId === gid) state.activeGroupId = null;
       toast(t('groupDeleted'), 'info');
       state.modal = null; render();
-    } catch (err) { toast(friendlyError(err), 'error'); }
+    } catch (err) {
+      console.error('deleteGroup error:', err);
+      toast(`${friendlyError(err)} [${err?.code || 'noma\u2019lum'}]`, 'error');
+    }
   });
 
   /* Ish reja / dars ishlanmasi hujjatlari */
@@ -1400,15 +1425,37 @@ function attachHandlers() {
     } catch (err) { toast(t('toastPhotoError'), 'error'); }
   });
   document.getElementById('saveAdBtn')?.addEventListener('click', async () => {
+    const title = document.getElementById('adTitle').value.trim();
+    const text = document.getElementById('adText').value.trim();
+    if (!title && !text) { toast(t('toastFillAllFields'), 'error'); return; }
     const data = {
-      enabled: document.getElementById('adEnabled').checked,
-      title: document.getElementById('adTitle').value.trim(),
-      text: document.getElementById('adText').value.trim(),
+      enabled: true,
+      title,
+      text,
       link: document.getElementById('adLink').value.trim(),
-      image: selectedAdImageBase64 || state.ad?.image || null,
+      image: selectedAdImageBase64 || null,
     };
-    try { await saveAd(data); toast(t('adsSaved'), 'info'); render(); }
+    try {
+      await addAd(data);
+      selectedAdImageBase64 = null;
+      document.getElementById('adTitle').value = '';
+      document.getElementById('adText').value = '';
+      document.getElementById('adLink').value = '';
+      document.getElementById('adImagePreviewWrap').innerHTML = '';
+      toast(t('adsSaved'), 'info');
+      render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+  document.querySelectorAll('[data-toggle-ad]').forEach(el => el.addEventListener('change', async () => {
+    try { await updateAd(el.dataset.toggleAd, { enabled: el.checked }); }
     catch (err) { toast(friendlyError(err), 'error'); }
+  }));
+  document.querySelectorAll('[data-delad]').forEach(el => el.addEventListener('click', async () => {
+    try { await deleteAd(el.dataset.delad); toast(t('docDeleted'), 'info'); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+  }));
+  document.getElementById('adCarouselClose')?.addEventListener('click', () => {
+    state.adDismissed = true; render();
   });
 }
 
@@ -1446,3 +1493,15 @@ function startLockCountdownIfNeeded() {
 }
 
 render();
+
+/* Reklama karuseli: har 6 soniyada avtomatik almashadi. To'liq render() emas,
+   faqat karusel DOM elementini yangilaydi — shu bilan boshqa joyda yozilayotgan
+   matn (formalar) buzilmaydi. */
+let adCarouselIndex = 0;
+setInterval(() => {
+  const track = document.getElementById('adBannerTrack');
+  if (!track || track.children.length <= 1) return;
+  adCarouselIndex = (adCarouselIndex + 1) % track.children.length;
+  track.style.transform = `translateX(-${adCarouselIndex * 100}%)`;
+  document.querySelectorAll('.ad-dot').forEach((d, i) => d.classList.toggle('active', i === adCarouselIndex));
+}, 6000);
