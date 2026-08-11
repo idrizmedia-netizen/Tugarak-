@@ -135,15 +135,22 @@ export async function grantAdmin(uid) {
   await setDoc(doc(db, 'admins', uid), { grantedAt: serverTimestamp() });
 }
 
-/* ---------- reklama (admin -> hammaga, sidebar'da chiqadi) ---------- */
-const DEFAULT_AD = { enabled: false, title: '', text: '', link: '', image: null };
-export function watchAd(callback) {
-  return onSnapshot(doc(db, 'settings', 'ad'), snap => {
-    callback(snap.exists() ? snap.data() : DEFAULT_AD);
+/* ---------- reklama (admin -> hammaga, bir nechta reklama, tepada karusel) ---------- */
+export function watchAds(callback) {
+  const q = query(collection(db, 'ads'), orderBy('createdAt', 'desc'));
+  return onSnapshot(q, snap => {
+    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
   });
 }
-export async function saveAd(data) {
-  await setDoc(doc(db, 'settings', 'ad'), data, { merge: true });
+export async function addAd(data) {
+  const ref = await addDoc(collection(db, 'ads'), { ...data, createdAt: serverTimestamp() });
+  return ref.id;
+}
+export async function updateAd(id, data) {
+  await updateDoc(doc(db, 'ads', id), data);
+}
+export async function deleteAd(id) {
+  await deleteDoc(doc(db, 'ads', id));
 }
 
 /* ---------- ish reja / dars ishlanmasi hujjatlari (guruhga bog'liq) ---------- */
