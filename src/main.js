@@ -547,6 +547,7 @@ function renderAdminSubscriptionView() {
 }
 
 function renderAdminAdsView() {
+  const todayStr = new Date().toISOString().slice(0, 10);
   return `<div class="card">
     <h2>${t('adsAdminTitle')}</h2>
     <div class="muted">${t('adsAdminDesc')}</div>
@@ -555,6 +556,10 @@ function renderAdminAdsView() {
     <label>${t('adsTextLabel')}</label>
     <textarea id="adText" rows="2" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:14px;font-family:inherit;" placeholder="${t('adsTextPh')}"></textarea>
     <label>${t('adsLinkLabel')}</label><input type="text" id="adLink" placeholder="${t('adsLinkPh')}">
+    <div class="grid2">
+      <div><label>${t('adsStartDateLabel')}</label><input type="date" id="adStartDate" value="${todayStr}"></div>
+      <div><label>${t('adsEndDateLabel')}</label><input type="date" id="adEndDate"></div>
+    </div>
     <label>${t('adsImageLabel')}</label>
     <div class="upload-drop" id="adImageDropZone" style="margin-top:6px;">
       <input type="file" id="adImageInput" accept="image/*" style="display:none;">${t('mPickPhoto')}
@@ -565,27 +570,43 @@ function renderAdminAdsView() {
   <div class="card">
     <h3 style="margin:0 0 10px;font-size:14px;">${t('adsPreview')}</h3>
     ${state.ads.length === 0 ? `<div class="empty">${t('docEmpty')}</div>` :
-      state.ads.map(ad => `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);">
+      state.ads.map(ad => {
+        const isLive = isAdCurrentlyActive(ad);
+        return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:10px;">
           ${ad.image ? `<img src="${ad.image}" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--line);">` : ''}
-          <div><b>${esc(ad.title || '')}</b><br><span class="muted" style="font-size:12px;">${esc((ad.text || '').slice(0, 60))}</span></div>
+          <div>
+            <b>${esc(ad.title || '')}</b> <span class="pill ${isLive ? 'approved' : 'pending'}">${isLive ? t('adsLive') : t('adsNotLive')}</span><br>
+            <span class="muted" style="font-size:12px;">${esc((ad.text || '').slice(0, 60))}</span><br>
+            <span class="muted" style="font-size:11px;">${ad.startDate || '\u2014'} \u2192 ${ad.endDate || t('adsNoEndDate')}</span>
+          </div>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <label class="check-row" style="margin:0;"><input type="checkbox" data-toggle-ad="${ad.id}" ${ad.enabled ? 'checked' : ''}> <span style="font-size:12px;">${t('adsEnableToggle')}</span></label>
           <button class="link-btn" data-delad="${ad.id}" style="color:var(--danger);">${t('docDelete')}</button>
         </div>
-      </div>`).join('')}
+      </div>`;
+      }).join('')}
   </div>`;
 }
 
+function isAdCurrentlyActive(ad) {
+  if (!ad.enabled) return false;
+  const today = new Date().toISOString().slice(0, 10);
+  if (ad.startDate && today < ad.startDate) return false;
+  if (ad.endDate && today > ad.endDate) return false;
+  return true;
+}
+
 function renderTopAdCarousel() {
-  const active = (state.ads || []).filter(a => a.enabled);
+  const active = (state.ads || []).filter(isAdCurrentlyActive);
   if (!active.length || state.adDismissed) return '';
   return `<div class="ad-carousel no-print" id="adCarousel">
     <button class="ad-carousel-close" id="adCarouselClose" aria-label="Yopish">\u2715</button>
     <div class="ad-carousel-track" id="adBannerTrack">
-      ${active.map(ad => `<a class="ad-slide" href="${ad.link ? esc(ad.link) : '#'}" target="${ad.link ? '_blank' : '_self'}" rel="noopener" style="${ad.image ? `background-image:url('${ad.image}');` : ''}">
-        <div class="ad-slide-overlay">
+      ${active.map(ad => `<a class="ad-slide" href="${ad.link ? esc(ad.link) : '#'}" target="${ad.link ? '_blank' : '_self'}" rel="noopener">
+        ${ad.image ? `<img class="ad-slide-thumb" src="${ad.image}">` : ''}
+        <div class="ad-slide-body">
           <span class="ad-slide-label">${t('adsBannerLabel')}</span>
           <div class="ad-slide-title">${esc(ad.title || '')}</div>
           <div class="ad-slide-text">${esc(ad.text || '')}</div>
@@ -1364,6 +1385,13 @@ function attachHandlers() {
   });
   document.getElementById('deleteGroupConfirmBtn')?.addEventListener('click', async () => {
     const gid = state.modal.groupId;
+    const g = state.groups.find(x => x.id === gid);
+    console.log('deleteGroup diagnostika:', {
+      groupId: gid,
+      group_teacherId: g?.teacherId,
+      current_uid: state.firebaseUser?.uid,
+      mos_keladimi: g?.teacherId === state.firebaseUser?.uid,
+    });
     try {
       // O'chirishdan oldin shu guruhga tegishli faol tinglovchilarni to'xtatamiz
       // (aks holda o'chirilgan hujjatga onSnapshot xato berishi mumkin).
@@ -1433,6 +1461,8 @@ function attachHandlers() {
       title,
       text,
       link: document.getElementById('adLink').value.trim(),
+      startDate: document.getElementById('adStartDate').value || null,
+      endDate: document.getElementById('adEndDate').value || null,
       image: selectedAdImageBase64 || null,
     };
     try {
@@ -1441,6 +1471,7 @@ function attachHandlers() {
       document.getElementById('adTitle').value = '';
       document.getElementById('adText').value = '';
       document.getElementById('adLink').value = '';
+      document.getElementById('adEndDate').value = '';
       document.getElementById('adImagePreviewWrap').innerHTML = '';
       toast(t('adsSaved'), 'info');
       render();
