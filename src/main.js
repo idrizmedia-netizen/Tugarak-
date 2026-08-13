@@ -628,6 +628,7 @@ function renderSubscriptionAdminCard() {
       <label>${t('subDiscountLabel')}</label><input type="text" inputmode="numeric" id="subDiscount_${key}" value="${p.discount || 0}">
       <label>${t('subMaxGroupsLabel')}</label><input type="text" inputmode="numeric" id="subMaxGroups_${key}" value="${p.maxGroups ?? 0}">
       <label>${t('subMaxStudentsLabel')}</label><input type="text" inputmode="numeric" id="subMaxStudents_${key}" value="${p.maxStudents ?? 0}">
+      <div class="info-box" style="font-size:11px;padding:7px 10px;">${t('subLimitNote')}</div>
       <label>${t('subFeaturesLabel')}</label>
       <textarea id="subFeatures_${key}" rows="4" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:13px;font-family:inherit;">${esc((p.features || []).join('\n'))}</textarea>
     </div>`;
