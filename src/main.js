@@ -732,6 +732,15 @@ function levelLabel(avg) {
 function renderTeacherDash() {
   const myGroups = state.groups;
   const activeGroup = myGroups.find(g => g.id === state.activeGroupId) || myGroups[0];
+  // MUHIM: agar activeGroupId hali sozlanmagan (null) bo'lsa-yu, birinchi guruh
+  // "standart" sifatida ko'rsatilayotgan bo'lsa — uni haqiqiy tanlangan holatga
+  // sinxronlaymiz. Aks holda "O'chirish"/"Tahrirlash" kabi tugmalar noto'g'ri
+  // (bo'sh) ID bilan ishlab, "ruxsat yo'q" xatosini berardi.
+  if (activeGroup && state.activeGroupId !== activeGroup.id) {
+    state.activeGroupId = activeGroup.id;
+    subscribeStudentsIfNeeded();
+    subscribeGroupDocsIfNeeded();
+  }
   const status = getSubStatus();
   const limit = getGroupLimit();
   return `
@@ -1385,8 +1394,6 @@ function attachHandlers() {
   });
   document.getElementById('deleteGroupConfirmBtn')?.addEventListener('click', async () => {
     const gid = state.modal.groupId;
-    const g = state.groups.find(x => x.id === gid);
-    console.log(`deleteGroup diagnostika: groupId=${gid} | group_teacherId=${g?.teacherId} | current_uid=${state.firebaseUser?.uid} | mos_keladimi=${g?.teacherId === state.firebaseUser?.uid}`);
     try {
       // O'chirishdan oldin shu guruhga tegishli faol tinglovchilarni to'xtatamiz
       // (aks holda o'chirilgan hujjatga onSnapshot xato berishi mumkin).
@@ -1399,8 +1406,7 @@ function attachHandlers() {
       toast(t('groupDeleted'), 'info');
       state.modal = null; render();
     } catch (err) {
-      console.error('deleteGroup error:', err);
-      toast(`${friendlyError(err)} [uid:${(state.firebaseUser?.uid || '').slice(0, 6)} vs teacherId:${(g?.teacherId || 'yo\u2019q').slice(0, 6)}]`, 'error');
+      toast(friendlyError(err), 'error');
     }
   });
 
