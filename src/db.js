@@ -48,10 +48,16 @@ export async function updateGroup(groupId, { name, subject }) {
   await updateDoc(doc(db, 'groups', groupId), { name, subject });
 }
 export async function deleteGroup(groupId) {
-  // Guruhga tegishli barcha o'quvchilarni ham o'chiramiz.
-  const q = query(collection(db, 'students'), where('groupId', '==', groupId));
-  const snap = await getDocs(q);
-  await Promise.all(snap.docs.map(d => deleteDoc(d.ref)));
+  // Guruhga tegishli barcha o'quvchilarni ham o'chiramiz. Agar (masalan eski,
+  // uzilib qolgan) yozuvlardan birortasi ruxsat xatosi bersa ham, bu butun
+  // jarayonni to'xtatib qo'ymaydi — guruhning o'zi baribir o'chiriladi.
+  try {
+    const q = query(collection(db, 'students'), where('groupId', '==', groupId));
+    const snap = await getDocs(q);
+    await Promise.allSettled(snap.docs.map(d => deleteDoc(d.ref)));
+  } catch (e) {
+    console.warn('O\u2019quvchilarni o\u2019chirishda ogohlantirish (davom etilmoqda):', e);
+  }
   await deleteDoc(doc(db, 'groups', groupId));
 }
 
