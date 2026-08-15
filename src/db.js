@@ -1,6 +1,239 @@
 import {
   collection, doc, addDoc, updateDoc, deleteDoc, getDocs, getDoc, setDoc,
-  query, where, orderBy, onSnapshot, serverTimestamp, arrayUnion, Timestamp
+  query, where, orderBy, onSnapshot, servimport {
+  collection, doc, addDoc, updateDoc, deleteDoc, getDocs, getDoc, setDoc,
+  query, where, orderBy, onSnapshot, serverTimestamp, arrayUnion, arrayRemove, deleteField, Timestamp
+} from 'firebase/firestore';
+import { db } from './firebase.js';
+
+/* ---------- users (teachers) ---------- */
+export function watchAllTeachers(callback) {
+  const q = query(collection(db, 'users'), where('role', '==', 'teacher'));
+  return onSnapshot(q, snap => {
+    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  });
+}
+export async function setTeacherStatus(uid, status) {
+  await updateDoc(doc(db, 'users', uid), { status, decidedAt: serverTimestamp() });
+}
+export async function rejectTeacher(uid, reason) {
+  await updateDoc(doc(db, 'users', uid), { status: 'rejected', rejectionReason: reason || '', decidedAt: serverTimestamp() });
+}
+export async function resubmitApplication(uid, { resubmitReason, proofDoc }) {
+  const data = {
+    status: 'pending',
+    resubmitReason: resubmitReason || '',
+    rejectionReason: '',
+    resubmittedAt: serverTimestamp()
+  };
+  if (proofDoc) data.proofDocs = arrayUnion(proofDoc);
+  await updateDoc(doc(db, 'users', uid), data);
+}
+export async function updateTeacherProfile(uid, { fullName, phone }) {
+  await updateDoc(doc(db, 'users', uid), { fullName, phone });
+}
+
+/* ---------- groups ---------- */
+// Guruhlarni ikki xil so'rov orqali olamiz: (1) o'zim yaratgan guruhlar,
+// (2) boshqa o'qituvchi meni hamkor sifatida qo'shgan guruhlar. Ikkalasini
+// birlashtirib beramiz — shunda hamkor o'qituvchi ham guruhni o'z ro'yxatida ko'radi.
+export function watchMyGroups(teacherId, callback) {
+  let owned = [], shared = [];
+  const emit = () => {
+    const map = new Map();
+    [...owned, ...shared].forEach(g => map.set(g.id, g));
+    callback(Array.from(map.values()));
+  };
+  const q1 = query(collection(db, 'groups'), where('teacherId', '==', teacherId));
+  const unsub1 = onSnapshot(q1, snap => { owned = snap.docs.map(d => ({ id: d.id, ...d.data() })); emit(); });
+  const q2 = query(collection(db, 'groups'), where('coTeachers', 'array-contains', teacherId));
+  const unsub2 = onSnapshot(q2, snap => { shared = snap.docs.map(d => ({ id: d.id, ...d.data() })); emit(); });
+  return () => { unsub1(); unsub2(); };
+}
+export async function createGroup(teacherId, name, subject) {
+  const ref = await addDoc(collection(db, 'groups'), {
+    teacherId, name, subject, coTeachers: [], createdAt: serverTimestamp()
+  });
+  return ref.id;
+}
+export async function updateGroup(groupId, { name, subject }) {
+  await updateDoc(doc(db, 'groups', groupId), { name, subject });
+}
+export async function deleteGroup(groupId) {
+  // Guruhga tegishli barcha o'quvchilarni ham o'chiramiz. Agar (masalan eski,
+  // uzilib qolgan) yozuvlardan birortasi ruxsat xatosi bersa ham, bu butun
+  // jarayonni to'xtatib qo'ymaydi — guruhning o'zi baribir o'chiriladi.
+  try {
+    const q = query(collection(db, 'students'), where('groupId', '==', groupId));
+    const snap = await getDocs(q);
+    await Promise.allSettled(snap.docs.map(d => deleteDoc(d.ref)));
+  } catch (e) {
+    console.warn('O\u2019quvchilarni o\u2019chirishda ogohlantirish (davom etilmoqda):', e);
+  }
+  await deleteDoc(doc(db, 'groups', groupId));
+}
+
+/* ---------- hamkor o'qituvchilar (bitta guruhni birga boshqarish) ---------- */
+export async function findApprovedTeacherByEmail(email) {
+  const q = query(collection(db, 'users'), where('email', '==', email.trim().toLowerCase()), where('status', '==', 'approved'));
+  const snap = await getDocs(q);
+  if (snap.empty) return null;
+  const d = snap.docs[0];
+  return { id: d.id, ...d.data() };
+}
+export async function addCoTeacher(groupId, teacherUid, info) {
+  await updateDoc(doc(db, 'groups', groupId), {
+    coTeachers: arrayUnion(teacherUid),
+    [`coTeacherInfo.${teacherUid}`]: info,
+  });
+}
+export async function removeCoTeacher(groupId, teacherUid) {
+  await updateDoc(doc(db, 'groups', groupId), {
+    coTeachers: arrayRemove(teacherUid),
+    [`coTeacherInfo.${teacherUid}`]: deleteField(),
+  });
+}
+
+/* ---------- students ---------- */
+export function watchGroupStudents(groupId, callback) {
+  const q = query(collection(db, 'students'), where('groupId', '==', groupId));
+  return onSnapshot(q, snap => {
+    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  });
+}
+// Eslatma: rasm Firebase Storage'ga emas, siqilgan base64 shaklda
+// to'g'ridan-to'g'ri Firestore hujjatiga saqlanadi (Spark/bepul reja bilan
+// mos ishlashi uchun). Bitta hujjat 1MB dan oshmasligi kerak, shuning uchun
+// rasm src/main.js'da yuklashdan oldin kichraytiriladi va siqiladi.
+export async function addStudent(teacherId, groupId, { fullName, className, photo, fromPhoto }) {
+  const ref = await addDoc(collection(db, 'students'), {
+    teacherId, groupId, fullName, className: className || '',
+    photo: photo || null, fromPhoto: !!fromPhoto,
+    grades: [], createdAt: serverTimestamp()
+  });
+  return ref.id;
+}
+export async function deleteStudent(studentId) {
+  await deleteDoc(doc(db, 'students', studentId));
+}
+export async function addGrade(studentId, subject, value, period) {
+  await updateDoc(doc(db, 'students', studentId), {
+    grades: arrayUnion({ subject, value, date: Date.now(), period: period || null })
+  });
+}
+
+/* ---------- bildirishnomalar (admin -> hammaga) ---------- */
+export function watchNotifications(callback) {
+  const q = query(collection(db, 'notifications'), orderBy('createdAt', 'desc'));
+  return onSnapshot(q, snap => {
+    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  });
+}
+export async function createNotification(title, message) {
+  await addDoc(collection(db, 'notifications'), { title, message, createdAt: serverTimestamp() });
+}
+
+/* ---------- obuna sozlamalari (admin boshqaradi, hamma o'qiy oladi) ---------- */
+const DEFAULT_PLANS = {
+  enabled: false,
+  plans: {
+    free: { price: 0, discount: 0, maxGroups: 1, maxStudents: 20, features: ["1 ta guruh", "20 tagacha o'quvchi", "Asosiy hisobotlar"] },
+    monthly: { price: 49000, discount: 0, maxGroups: 0, maxStudents: 0, features: ["Cheksiz guruh", "Cheksiz o'quvchi", "Excel eksport", "Bildirishnomalar"] },
+    yearly: { price: 490000, discount: 15, maxGroups: 0, maxStudents: 0, features: ["Cheksiz guruh", "Cheksiz o'quvchi", "Excel eksport", "Bildirishnomalar", "Ustuvor yordam"] },
+  }
+};
+export function watchSubscriptionSettings(callback) {
+  return onSnapshot(doc(db, 'settings', 'subscription'), snap => {
+    callback(snap.exists() ? snap.data() : DEFAULT_PLANS);
+  });
+}
+export async function saveSubscriptionSettings(data) {
+  await setDoc(doc(db, 'settings', 'subscription'), data, { merge: true });
+}
+export async function chooseSubscriptionPlan(uid, planKey) {
+  await updateDoc(doc(db, 'users', uid), { selectedPlan: planKey, planContacted: false, planChosenAt: serverTimestamp() });
+}
+export async function markPlanContacted(uid) {
+  await updateDoc(doc(db, 'users', uid), { planContacted: true });
+}
+export async function activateSubscription(uid, planKey) {
+  const now = Date.now();
+  let expiresAt = null;
+  if (planKey === 'monthly') expiresAt = Timestamp.fromMillis(now + 30 * 24 * 60 * 60 * 1000);
+  else if (planKey === 'yearly') expiresAt = Timestamp.fromMillis(now + 365 * 24 * 60 * 60 * 1000);
+  await updateDoc(doc(db, 'users', uid), {
+    plan: planKey,
+    planActivatedAt: serverTimestamp(),
+    planExpiresAt: expiresAt,
+    planContacted: true,
+  });
+}
+
+/* ---------- admin bootstrap helper (run once manually, see README) ---------- */
+export async function grantAdmin(uid) {
+  await setDoc(doc(db, 'admins', uid), { grantedAt: serverTimestamp() });
+}
+
+/* ---------- reklama (admin -> hammaga, bir nechta reklama, tepada karusel) ---------- */
+export function watchAds(callback) {
+  const q = query(collection(db, 'ads'), orderBy('createdAt', 'desc'));
+  return onSnapshot(q, snap => {
+    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  });
+}
+export async function addAd(data) {
+  const ref = await addDoc(collection(db, 'ads'), { ...data, createdAt: serverTimestamp() });
+  return ref.id;
+}
+export async function updateAd(id, data) {
+  await updateDoc(doc(db, 'ads', id), data);
+}
+export async function deleteAd(id) {
+  await deleteDoc(doc(db, 'ads', id));
+}
+
+/* ---------- ish reja / dars ishlanmasi hujjatlari (guruhga bog'liq) ---------- */
+export function watchGroupDocs(groupId, callback) {
+  const q = query(collection(db, 'groupDocs'), where('groupId', '==', groupId));
+  return onSnapshot(q, snap => {
+    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  });
+}
+export async function addGroupDoc(teacherId, groupId, { title, category, fileName, fileData }) {
+  const ref = await addDoc(collection(db, 'groupDocs'), {
+    teacherId, groupId, title, category, fileName, fileData, createdAt: serverTimestamp()
+  });
+  return ref.id;
+}
+export async function deleteGroupDoc(docId) {
+  await deleteDoc(doc(db, 'groupDocs', docId));
+}
+
+/* ---------- davomat (yo'qlama) ---------- */
+export function watchGroupAttendance(groupId, callback) {
+  const q = query(collection(db, 'attendance'), where('groupId', '==', groupId));
+  return onSnapshot(q, snap => {
+    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  });
+}
+export async function saveAttendance(teacherId, groupId, date, records) {
+  const docId = `${groupId}_${date}`;
+  await setDoc(doc(db, 'attendance', docId), {
+    teacherId, groupId, date, records, updatedAt: serverTimestamp()
+  }, { merge: true });
+}
+
+/* ---------- admin: butun tizim bo'yicha hisobotlar uchun to'liq ma'lumot ---------- */
+export function watchAllGroupsAdmin(callback) {
+  return onSnapshot(collection(db, 'groups'), snap => {
+    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  });
+}
+export function watchAllStudentsAdmin(callback) {
+  return onSnapshot(collection(db, 'students'), snap => {
+    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  });
+}erTimestamp, arrayUnion, Timestamp
 } from 'firebase/firestore';
 import { db } from './firebase.js';
 
