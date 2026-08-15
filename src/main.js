@@ -10,7 +10,10 @@ import {
   rejectTeacher, resubmitApplication, updateTeacherProfile,
   watchSubscriptionSettings, saveSubscriptionSettings, chooseSubscriptionPlan, markPlanContacted,
   activateSubscription, watchAds, addAd, updateAd, deleteAd,
-  watchGroupDocs, addGroupDoc, deleteGroupDoc
+  watchGroupDocs, addGroupDoc, deleteGroupDoc,
+  watchGroupAttendance, saveAttendance,
+  findApprovedTeacherByEmail, addCoTeacher, removeCoTeacher,
+  watchAllGroupsAdmin, watchAllStudentsAdmin
 } from './db.js';
 import { auth } from './firebase.js';
 import { parseRosterFile } from './importParsers.js';
@@ -61,9 +64,12 @@ let state = {
   ads: [],
   adDismissed: false,
   groupDocs: [],
+  attendance: [],
+  allGroupsAdmin: [],
+  allStudentsAdmin: [],
 };
 
-let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubGroupDocs = null;
+let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubGroupDocs = null, unsubAttendance = null, unsubAllGroupsAdmin = null, unsubAllStudentsAdmin = null;
 const uid = () => 'x' + Math.random().toString(36).slice(2, 9);
 
 function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -109,6 +115,9 @@ watchAuth(async (user) => {
   if (unsubSubscription) { unsubSubscription(); unsubSubscription = null; }
   if (unsubAds) { unsubAds(); unsubAds = null; }
   if (unsubGroupDocs) { unsubGroupDocs(); unsubGroupDocs = null; }
+  if (unsubAttendance) { unsubAttendance(); unsubAttendance = null; }
+  if (unsubAllGroupsAdmin) { unsubAllGroupsAdmin(); unsubAllGroupsAdmin = null; }
+  if (unsubAllStudentsAdmin) { unsubAllStudentsAdmin(); unsubAllStudentsAdmin = null; }
 
   if (!user) {
     state.role = null; state.userDoc = null; state.notifications = [];
@@ -129,6 +138,8 @@ watchAuth(async (user) => {
     state.role = 'admin';
     state.view = 'adminDash';
     unsubTeachers = watchAllTeachers(list => { state.teachers = list; render(); });
+    unsubAllGroupsAdmin = watchAllGroupsAdmin(list => { state.allGroupsAdmin = list; render(); });
+    unsubAllStudentsAdmin = watchAllStudentsAdmin(list => { state.allStudentsAdmin = list; render(); });
     render();
     return;
   }
@@ -145,6 +156,7 @@ watchAuth(async (user) => {
       if (!state.activeGroupId && list.length) state.activeGroupId = list[0].id;
       subscribeStudentsIfNeeded();
       subscribeGroupDocsIfNeeded();
+      subscribeAttendanceIfNeeded();
       render();
     });
   } else {
@@ -163,6 +175,12 @@ function subscribeGroupDocsIfNeeded() {
   if (unsubGroupDocs) { unsubGroupDocs(); unsubGroupDocs = null; }
   if (state.activeGroupId) {
     unsubGroupDocs = watchGroupDocs(state.activeGroupId, list => { state.groupDocs = list; render(); });
+  }
+}
+function subscribeAttendanceIfNeeded() {
+  if (unsubAttendance) { unsubAttendance(); unsubAttendance = null; }
+  if (state.activeGroupId) {
+    unsubAttendance = watchGroupAttendance(state.activeGroupId, list => { state.attendance = list; render(); });
   }
 }
 
@@ -185,6 +203,7 @@ function render() {
     if (state.view === 'adminNotifications') app.innerHTML = renderShell(renderAdminNotificationsView(), 'adminNotifications');
     else if (state.view === 'adminSubscription') app.innerHTML = renderShell(renderAdminSubscriptionView(), 'adminSubscription');
     else if (state.view === 'adminAds') app.innerHTML = renderShell(renderAdminAdsView(), 'adminAds');
+    else if (state.view === 'adminReports') app.innerHTML = renderShell(renderAdminReportsView(), 'adminReports');
     else app.innerHTML = renderShell(renderAdminDash(), 'adminDash');
   } else if (state.view === 'googleComplete') {
     app.innerHTML = renderGoogleCompleteScreen();
@@ -291,7 +310,7 @@ function topbar() {
 function renderShell(inner, activeView) {
   const role = state.role;
   const nav = role === 'admin'
-    ? [['adminDash', '\u{1F5C2}', t('navApprovals')], ['adminNotifications', '\u{1F4E2}', t('navNotifications')], ['adminSubscription', '\u{1F4B3}', t('navSubscription')], ['adminAds', '\u{1F4E3}', t('navAds')]]
+    ? [['adminDash', '\u{1F5C2}', t('navApprovals')], ['adminNotifications', '\u{1F4E2}', t('navNotifications')], ['adminSubscription', '\u{1F4B3}', t('navSubscription')], ['adminAds', '\u{1F4E3}', t('navAds')], ['adminReports', '\u{1F4CA}', t('navReports')]]
     : [['teacherDash', '\u{1F3E0}', t('navTeacher')], ['subscription', '\u{1F4B3}', t('navSubscription')]];
   const navBtn = (v, ic, l, cls) => `<button class="${v === activeView ? 'active' : ''}" data-navto="${v}">${cls === 'bottom' ? `${ic}<span>${l}</span>` : `${ic} ${l}`}</button>`;
   return `${renderTopAdCarousel()}${topbar()}
@@ -546,6 +565,50 @@ function renderAdminSubscriptionView() {
   return `${renderSubscriptionAdminCard()}${renderSubscriptionRequestsCard()}`;
 }
 
+function renderAdminReportsView() {
+  const groups = state.allGroupsAdmin || [];
+  const students = state.allStudentsAdmin || [];
+  const groupAvg = (g) => {
+    const gs = students.filter(s => s.groupId === g.id && s.grades?.length);
+    if (!gs.length) return null;
+    return gs.reduce((a, s) => a + studentAvg(s), 0) / gs.length;
+  };
+  const ranked = groups
+    .map(g => ({ ...g, avg: groupAvg(g), studentCount: students.filter(s => s.groupId === g.id).length }))
+    .filter(g => g.avg !== null)
+    .sort((a, b) => b.avg - a.avg)
+    .slice(0, 10);
+  const overallAvg = (() => {
+    const withGrades = students.filter(s => s.grades?.length);
+    if (!withGrades.length) return 0;
+    return withGrades.reduce((a, s) => a + studentAvg(s), 0) / withGrades.length;
+  })();
+  const teacherNameByUid = {};
+  state.teachers.forEach(tc => { teacherNameByUid[tc.id] = tc.fullName; });
+
+  return `<div class="card" id="reportPrintArea">
+    <div style="display:none;" class="jurnal-header">
+      <h2 style="text-align:center;margin:0 0 4px;">TUGARAK+ \u2014 TIZIM BO'YICHA HISOBOT</h2>
+      <p style="text-align:center;margin:0 0 16px;">${t('reportGeneratedAt')} ${new Date().toLocaleDateString()}</p>
+    </div>
+    <h2 style="margin:0;">${t('adminReportsTitle')}</h2>
+    <div class="muted">${t('adminReportsDesc')}</div>
+    <div class="stat-grid" style="margin:16px 0;">
+      <div class="stat-card"><div class="num">${state.teachers.filter(tc => tc.status === 'approved').length}</div><div class="lbl">${t('reportTotalTeachers')}</div></div>
+      <div class="stat-card"><div class="num">${groups.length}</div><div class="lbl">${t('reportTotalGroups')}</div></div>
+      <div class="stat-card"><div class="num">${students.length}</div><div class="lbl">${t('reportTotalStudents')}</div></div>
+      <div class="stat-card"><div class="num">${overallAvg.toFixed(2)}</div><div class="lbl">${t('reportAvgScore')}</div></div>
+    </div>
+    <div class="divider"></div>
+    <h3 style="font-size:14px;margin:0 0 10px;">${t('adminTopGroupsTitle')}</h3>
+    ${ranked.length === 0 ? `<div class="empty">${t('adminTopGroupsEmpty')}</div>` : `
+    <table><thead><tr><th>\u2116</th><th>${t('mGroupNameLabel')}</th><th>${t('colName')}</th><th>${t('profileStudents')}</th><th>${t('colAvg')}</th></tr></thead><tbody>
+    ${ranked.map((g, i) => `<tr><td>${i + 1}</td><td><b>${esc(g.name)}</b></td><td>${esc(teacherNameByUid[g.teacherId] || '\u2014')}</td><td>${g.studentCount}</td><td><b>${g.avg.toFixed(2)}</b></td></tr>`).join('')}
+    </tbody></table>`}
+    <button class="btn btn-primary no-print" id="downloadReportBtn" style="margin-top:18px;">${t('adminDownloadReport')}</button>
+  </div>`;
+}
+
 function renderAdminAdsView() {
   const todayStr = new Date().toISOString().slice(0, 10);
   return `<div class="card">
@@ -721,6 +784,18 @@ function renderSubscriptionView() {
 
 /* ---------- TEACHER DASHBOARD ---------- */
 function studentAvg(s) { if (!s.grades || !s.grades.length) return 0; return s.grades.reduce((a, g) => a + g.value, 0) / s.grades.length; }
+function studentAttendancePercent(studentId) {
+  if (!state.attendance.length) return null;
+  let total = 0, present = 0;
+  state.attendance.forEach(a => {
+    if (a.records && Object.prototype.hasOwnProperty.call(a.records, studentId)) {
+      total++;
+      if (a.records[studentId]) present++;
+    }
+  });
+  if (!total) return null;
+  return Math.round((present / total) * 100);
+}
 function gradeClass(v) { if (v >= 5) return 'g5'; if (v >= 4) return 'g4'; if (v >= 3) return 'g3'; return 'g2'; }
 function levelLabel(avg) {
   if (avg === 0) return { label: t('levelUngraded'), c: 'var(--ink-soft)' };
@@ -740,7 +815,7 @@ function renderTeacherDash() {
   if (activeGroup && state.activeGroupId !== activeGroup.id) {
     state.activeGroupId = activeGroup.id;
     subscribeStudentsIfNeeded();
-    subscribeGroupDocsIfNeeded();
+    subscribeGroupDocsIfNeeded(); subscribeAttendanceIfNeeded();
   }
   const status = getSubStatus();
   const limit = getGroupLimit();
@@ -765,6 +840,7 @@ function renderGroupPanel(group) {
   const students = state.students.filter(s => s.groupId === group.id);
   const withGrades = students.filter(s => s.grades && s.grades.length);
   const avg = withGrades.length ? withGrades.reduce((a, s) => a + studentAvg(s), 0) / withGrades.length : 0;
+  const isOwner = group.teacherId === state.firebaseUser?.uid;
   return `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div><h2 style="margin:0;">${esc(group.name)}</h2><span class="tag-subject">${esc(group.subject)}</span></div>
@@ -772,12 +848,14 @@ function renderGroupPanel(group) {
         <button class="btn btn-outline" id="addManualBtn" ${locked ? 'disabled' : ''}>${t('addManualBtn')}</button>
         <button class="btn btn-outline" id="addPhotoBtn" ${locked ? 'disabled' : ''}>${t('addPhotoBtn')}</button>
         <button class="btn btn-outline" id="bulkImportBtn" ${locked ? 'disabled' : ''}>${t('bulkImportBtn')}</button>
+        <button class="btn btn-outline" id="attendanceBtn" ${locked ? 'disabled' : ''}>${t('attendanceBtn')}</button>
         <button class="btn btn-outline" id="docsBtn">${t('docsBtn')}</button>
         <button class="btn btn-outline" id="quarterlyBtn">${t('quarterlyBtn')}</button>
         <button class="btn btn-outline" id="excelExportBtn" ${locked ? 'disabled' : ''}>${t('exportExcelBtn')}</button>
         <button class="btn btn-primary" id="printBtn" ${locked ? 'disabled' : ''}>${t('exportPrintBtn')}</button>
+        ${isOwner ? `<button class="btn btn-outline" id="coTeacherBtn">${t('coTeacherBtn')}</button>
         <button class="btn btn-outline" id="editGroupBtn">${t('editGroupBtn')}</button>
-        <button class="btn btn-danger" id="deleteGroupBtn">${t('deleteGroupBtn')}</button>
+        <button class="btn btn-danger" id="deleteGroupBtn">${t('deleteGroupBtn')}</button>` : ''}
       </div>
     </div>
     ${locked ? `<div class="error-box" style="margin-top:12px;"><b>${t('groupLockedTitle')}</b><br>${t('groupLockedMsg')} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>` : ''}
@@ -788,9 +866,10 @@ function renderGroupPanel(group) {
       <p style="text-align:center;margin:0 0 4px;">"${esc(group.name)}" to'garagi \u2014 ${esc(group.subject)}</p>
       <p style="text-align:center;margin:0 0 16px;">Rahbar: ${esc(state.userDoc?.fullName || '')} &nbsp;\u00B7&nbsp; ${new Date().getFullYear()}-${new Date().getFullYear() + 1} o'quv yili</p>
     </div>
-    <table><thead><tr><th>${t('colNum')}</th><th>${t('colPhoto')}</th><th>${t('colFullName')}</th><th>${t('colClass')}</th><th>${t('colGrades')}</th><th>${t('colAvg')}</th><th>${t('colLevel')}</th><th class="no-print"></th></tr></thead><tbody>
+    <table><thead><tr><th>${t('colNum')}</th><th>${t('colPhoto')}</th><th>${t('colFullName')}</th><th>${t('colClass')}</th><th>${t('colGrades')}</th><th>${t('colAvg')}</th><th>${t('colLevel')}</th><th>${t('colAttendance')}</th><th class="no-print"></th></tr></thead><tbody>
     ${students.map((s, i) => {
       const a = studentAvg(s); const lvl = levelLabel(a);
+      const att = studentAttendancePercent(s.id);
       return `<tr>
         <td>${i + 1}</td>
         <td>${s.photo ? `<img class="student-photo" src="${s.photo}">` : '\u2014'}</td>
@@ -801,6 +880,7 @@ function renderGroupPanel(group) {
         <td><b>${a ? a.toFixed(2) : '\u2014'}</b></td>
         <td><span style="color:${lvl.c};font-weight:700;">${lvl.label}</span>
           <div class="progress-bar" style="margin-top:4px;"><div style="width:${Math.min(100, a / 5 * 100)}%;"></div></div></td>
+        <td>${att === null ? '<span class="muted">\u2014</span>' : `<b>${att}%</b>`}</td>
         <td class="no-print"><button class="link-btn" data-delstudent="${s.id}" style="color:var(--danger);" ${locked ? 'disabled' : ''}>${t('deleteLink')}</button></td>
       </tr>`;
     }).join('')}
@@ -987,6 +1067,51 @@ function renderModal() {
       <div style="display:flex;gap:10px;margin-top:18px;">
         <button class="btn btn-outline block" id="modalCancel">${t('mClose')}</button>
         <button class="btn btn-teal block" id="docUploadBtn">${t('docUploadBtn')}</button>
+      </div></div></div>`;
+  }
+  if (m.type === 'attendance') {
+    const group = state.groups.find(g => g.id === m.groupId);
+    const students = state.students.filter(s => s.groupId === m.groupId);
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const existing = state.attendance.find(a => a.date === (m.date || todayStr));
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:460px;">
+      <h2>${t('attendanceTitle')}</h2>
+      <label>${t('attendanceDateLabel')}</label><input type="date" id="attDate" value="${m.date || todayStr}">
+      ${students.length === 0 ? `<div class="empty">${t('emptyStudents')}</div>` :
+        `<div style="margin-top:12px;max-height:340px;overflow:auto;">
+        ${students.map(s => {
+          const checked = existing?.records ? existing.records[s.id] !== false : true;
+          return `<label class="check-row" style="justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:8px;">
+            <span>${esc(s.fullName)}</span>
+            <input type="checkbox" data-att-student="${s.id}" ${checked ? 'checked' : ''}>
+          </label>`;
+        }).join('')}
+      </div>`}
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="attendanceSaveBtn">${t('attendanceSave')}</button>
+      </div></div></div>`;
+  }
+  if (m.type === 'coTeachers') {
+    const group = state.groups.find(g => g.id === m.groupId);
+    const info = group?.coTeacherInfo || {};
+    const ids = group?.coTeachers || [];
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:440px;">
+      <h2>${t('coTeacherTitle')}</h2>
+      <div class="muted">${t('coTeacherDesc')}</div>
+      <div class="divider"></div>
+      <h3 style="font-size:13px;margin:0 0 8px;">${t('coTeacherList')}</h3>
+      <div style="margin-bottom:14px;">
+        ${ids.length === 0 ? `<div class="muted" style="font-size:12.5px;">${t('coTeacherEmpty')}</div>` :
+          ids.map(uid => `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;">
+            <span style="font-size:13px;">${esc(info[uid]?.fullName || info[uid]?.email || uid)}</span>
+            <button class="link-btn" data-removecoteacher="${uid}" style="color:var(--danger);font-size:12px;">${t('coTeacherRemove')}</button>
+          </div>`).join('')}
+      </div>
+      <label>${t('coTeacherEmailLabel')}</label><input type="email" id="coTeacherEmail" placeholder="siz@example.com">
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('mClose')}</button>
+        <button class="btn btn-teal block" id="coTeacherAddBtn">${t('coTeacherAdd')}</button>
       </div></div></div>`;
   }
   return '';
@@ -1269,17 +1394,20 @@ function attachHandlers() {
     state.modal = { type: 'newGroup' }; render();
   });
   document.querySelectorAll('[data-selectgroup]').forEach(el => el.addEventListener('click', () => {
-    state.activeGroupId = el.dataset.selectgroup; subscribeStudentsIfNeeded(); subscribeGroupDocsIfNeeded(); render();
+    state.activeGroupId = el.dataset.selectgroup; subscribeStudentsIfNeeded(); subscribeGroupDocsIfNeeded(); subscribeAttendanceIfNeeded(); render();
   }));
   document.getElementById('addManualBtn')?.addEventListener('click', () => { state.modal = { type: 'addManual' }; render(); });
   document.getElementById('addPhotoBtn')?.addEventListener('click', () => { state.modal = { type: 'addPhoto' }; render(); });
   document.getElementById('bulkImportBtn')?.addEventListener('click', () => { state.modal = { type: 'bulkImport' }; render(); });
   document.getElementById('docsBtn')?.addEventListener('click', () => { state.modal = { type: 'groupDocs' }; render(); });
+  document.getElementById('attendanceBtn')?.addEventListener('click', () => { state.modal = { type: 'attendance', groupId: state.activeGroupId }; render(); });
+  document.getElementById('coTeacherBtn')?.addEventListener('click', () => { state.modal = { type: 'coTeachers', groupId: state.activeGroupId }; render(); });
   document.getElementById('editGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'editGroup', groupId: state.activeGroupId }; render(); });
   document.getElementById('deleteGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'deleteGroupConfirm', groupId: state.activeGroupId }; render(); });
   document.getElementById('quarterlyBtn')?.addEventListener('click', () => { state.modal = { type: 'quarterly', groupId: state.activeGroupId }; render(); });
   document.getElementById('printBtn')?.addEventListener('click', () => window.print());
   document.getElementById('excelExportBtn')?.addEventListener('click', () => exportGroupToExcel());
+  document.getElementById('downloadReportBtn')?.addEventListener('click', () => window.print());
   document.querySelectorAll('[data-addgrade]').forEach(el => el.addEventListener('click', () => { state.modal = { type: 'addGrade', studentId: el.dataset.addgrade }; render(); }));
   document.querySelectorAll('[data-delstudent]').forEach(el => el.addEventListener('click', async () => { await deleteStudent(el.dataset.delstudent); }));
 
@@ -1293,7 +1421,7 @@ function attachHandlers() {
     const subject = document.getElementById('ngSubject').value.trim();
     if (!name || !subject) { toast(t('toastFillAllFields'), 'error'); return; }
     const gid = await createGroup(state.firebaseUser.uid, name, subject);
-    state.activeGroupId = gid; subscribeStudentsIfNeeded(); subscribeGroupDocsIfNeeded();
+    state.activeGroupId = gid; subscribeStudentsIfNeeded(); subscribeGroupDocsIfNeeded(); subscribeAttendanceIfNeeded();
     state.modal = null; render();
   });
 
@@ -1444,6 +1572,44 @@ function attachHandlers() {
     catch (err) { toast(friendlyError(err), 'error'); }
   }));
 
+  /* Davomat (yo'qlama) */
+  document.getElementById('attDate')?.addEventListener('change', (e) => {
+    state.modal.date = e.target.value; render();
+  });
+  document.getElementById('attendanceSaveBtn')?.addEventListener('click', async () => {
+    const date = document.getElementById('attDate').value;
+    const records = {};
+    document.querySelectorAll('[data-att-student]').forEach(el => {
+      records[el.dataset.attStudent] = el.checked;
+    });
+    try {
+      await saveAttendance(state.firebaseUser.uid, state.activeGroupId, date, records);
+      toast(t('attendanceSaved'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+
+  /* Hamkor o'qituvchi */
+  document.getElementById('coTeacherAddBtn')?.addEventListener('click', async () => {
+    const email = document.getElementById('coTeacherEmail').value.trim();
+    if (!email) { toast(t('toastEnterEmailFirst'), 'error'); return; }
+    try {
+      const found = await findApprovedTeacherByEmail(email);
+      if (!found) { toast(t('coTeacherNotFound'), 'error'); return; }
+      const group = state.groups.find(g => g.id === state.modal.groupId);
+      if (found.id === state.firebaseUser.uid || (group?.coTeachers || []).includes(found.id)) {
+        toast(t('coTeacherAlready'), 'error'); return;
+      }
+      await addCoTeacher(state.modal.groupId, found.id, { fullName: found.fullName || '', email: found.email || email });
+      toast(t('coTeacherAdded'), 'info');
+      render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+  document.querySelectorAll('[data-removecoteacher]').forEach(el => el.addEventListener('click', async () => {
+    try { await removeCoTeacher(state.modal.groupId, el.dataset.removecoteacher); render(); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+  }));
+
   /* Reklama (admin) */
   let selectedAdImageBase64 = null;
   document.getElementById('adImageDropZone')?.addEventListener('click', () => document.getElementById('adImageInput').click());
@@ -1506,6 +1672,7 @@ function exportGroupToExcel() {
       [t('colGrades')]: (s.grades || []).map(g => `${g.subject}:${g.value}`).join(', '),
       [t('colAvg')]: a ? Number(a.toFixed(2)) : '',
       [t('colLevel')]: lvl.label,
+      [t('colAttendance')]: (() => { const p = studentAttendancePercent(s.id); return p === null ? '' : `${p}%`; })(),
     };
   });
   const ws = XLSX.utils.json_to_sheet(rows);
