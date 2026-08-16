@@ -18,7 +18,6 @@ import {
 import { auth } from './firebase.js';
 import { parseRosterFile } from './importParsers.js';
 import { t, LANGS, getLang, setLang, contractText } from './i18n.js';
-import * as XLSX from 'xlsx';
 
 /** Rasmni kichraytirib, siqilgan base64 (JPEG) shaklga o'giradi.
  *  Firebase Storage o'rniga to'g'ridan-to'g'ri Firestore'da saqlash uchun
@@ -1409,7 +1408,10 @@ function attachHandlers() {
   document.getElementById('excelExportBtn')?.addEventListener('click', () => exportGroupToExcel());
   document.getElementById('downloadReportBtn')?.addEventListener('click', () => window.print());
   document.querySelectorAll('[data-addgrade]').forEach(el => el.addEventListener('click', () => { state.modal = { type: 'addGrade', studentId: el.dataset.addgrade }; render(); }));
-  document.querySelectorAll('[data-delstudent]').forEach(el => el.addEventListener('click', async () => { await deleteStudent(el.dataset.delstudent); }));
+  document.querySelectorAll('[data-delstudent]').forEach(el => el.addEventListener('click', async () => {
+    try { await deleteStudent(el.dataset.delstudent); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+  }));
 
   /* Modal generic */
   document.getElementById('modalCancel')?.addEventListener('click', () => { state.modal = null; render(); });
@@ -1430,8 +1432,14 @@ function attachHandlers() {
     const name = document.getElementById('amName').value.trim();
     const cls = document.getElementById('amClass').value.trim();
     if (!name) { toast(t('toastEnterName'), 'error'); return; }
-    await addStudent(state.firebaseUser.uid, state.activeGroupId, { fullName: name, className: cls });
-    state.modal = null; render();
+    const btn = document.getElementById('amSave'); btn.disabled = true;
+    try {
+      await addStudent(state.firebaseUser.uid, state.activeGroupId, { fullName: name, className: cls });
+      state.modal = null; render();
+    } catch (err) {
+      toast(friendlyError(err), 'error');
+      btn.disabled = false;
+    }
   });
 
   let selectedPhotoBase64 = null;
@@ -1464,8 +1472,10 @@ function attachHandlers() {
     const value = parseInt(document.getElementById('agValue').value);
     const period = document.getElementById('agPeriod')?.value || '';
     if (!subject) { toast(t('toastEnterSubject'), 'error'); return; }
-    await addGrade(state.modal.studentId, subject, value, period);
-    state.modal = null; render();
+    try {
+      await addGrade(state.modal.studentId, subject, value, period);
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
   });
 
   /* Fayldan (Excel/CSV/Word) ommaviy o'quvchi import qilish */
@@ -1544,7 +1554,7 @@ function attachHandlers() {
   document.getElementById('docDropZone')?.addEventListener('click', () => document.getElementById('docFileInput').click());
   document.getElementById('docFileInput')?.addEventListener('change', (e) => {
     const file = e.target.files[0]; if (!file) return;
-    if (file.size > 700 * 1024) { toast(t('docTooLarge'), 'error'); return; }
+    if (file.size > 500 * 1024) { toast(t('docTooLarge'), 'error'); return; }
     const reader = new FileReader();
     reader.onload = (ev) => {
       selectedDocBase64 = ev.target.result;
@@ -1659,10 +1669,11 @@ function attachHandlers() {
 }
 
 
-function exportGroupToExcel() {
+async function exportGroupToExcel() {
   const group = state.groups.find(g => g.id === state.activeGroupId);
   const students = state.students.filter(s => s.groupId === state.activeGroupId);
   if (!group || !students.length) { toast(t('emptyStudents').replace(/<br>/g, ' '), 'error'); return; }
+  const XLSX = await import('xlsx');
   const rows = students.map((s, i) => {
     const a = studentAvg(s); const lvl = levelLabel(a);
     return {
