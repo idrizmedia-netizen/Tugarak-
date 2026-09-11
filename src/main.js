@@ -13,7 +13,8 @@ import {
   watchGroupDocs, addGroupDoc, deleteGroupDoc,
   watchGroupAttendance, saveAttendance,
   findApprovedTeacherByEmail, addCoTeacher, removeCoTeacher,
-  watchAllGroupsAdmin, watchAllStudentsAdmin
+  watchAllGroupsAdmin, watchAllStudentsAdmin,
+  watchWorkPlan, saveWorkPlanItems
 } from './db.js';
 import { auth } from './firebase.js';
 import { parseRosterFile } from './importParsers.js';
@@ -64,11 +65,12 @@ let state = {
   adDismissed: false,
   groupDocs: [],
   attendance: [],
+  workPlan: [],
   allGroupsAdmin: [],
   allStudentsAdmin: [],
 };
 
-let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubGroupDocs = null, unsubAttendance = null, unsubAllGroupsAdmin = null, unsubAllStudentsAdmin = null;
+let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubGroupDocs = null, unsubAttendance = null, unsubWorkPlan = null, unsubAllGroupsAdmin = null, unsubAllStudentsAdmin = null;
 const uid = () => 'x' + Math.random().toString(36).slice(2, 9);
 
 function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -115,6 +117,7 @@ watchAuth(async (user) => {
   if (unsubAds) { unsubAds(); unsubAds = null; }
   if (unsubGroupDocs) { unsubGroupDocs(); unsubGroupDocs = null; }
   if (unsubAttendance) { unsubAttendance(); unsubAttendance = null; }
+  if (unsubWorkPlan) { unsubWorkPlan(); unsubWorkPlan = null; }
   if (unsubAllGroupsAdmin) { unsubAllGroupsAdmin(); unsubAllGroupsAdmin = null; }
   if (unsubAllStudentsAdmin) { unsubAllStudentsAdmin(); unsubAllStudentsAdmin = null; }
 
@@ -155,7 +158,7 @@ watchAuth(async (user) => {
       if (!state.activeGroupId && list.length) state.activeGroupId = list[0].id;
       subscribeStudentsIfNeeded();
       subscribeGroupDocsIfNeeded();
-      subscribeAttendanceIfNeeded();
+      subscribeAttendanceIfNeeded(); subscribeWorkPlanIfNeeded();
       render();
     });
   } else {
@@ -180,6 +183,12 @@ function subscribeAttendanceIfNeeded() {
   if (unsubAttendance) { unsubAttendance(); unsubAttendance = null; }
   if (state.activeGroupId) {
     unsubAttendance = watchGroupAttendance(state.activeGroupId, list => { state.attendance = list; render(); });
+  }
+}
+function subscribeWorkPlanIfNeeded() {
+  if (unsubWorkPlan) { unsubWorkPlan(); unsubWorkPlan = null; }
+  if (state.activeGroupId) {
+    unsubWorkPlan = watchWorkPlan(state.activeGroupId, items => { state.workPlan = items; render(); });
   }
 }
 
@@ -814,7 +823,7 @@ function renderTeacherDash() {
   if (activeGroup && state.activeGroupId !== activeGroup.id) {
     state.activeGroupId = activeGroup.id;
     subscribeStudentsIfNeeded();
-    subscribeGroupDocsIfNeeded(); subscribeAttendanceIfNeeded();
+    subscribeGroupDocsIfNeeded(); subscribeAttendanceIfNeeded(); subscribeWorkPlanIfNeeded();
   }
   const status = getSubStatus();
   const limit = getGroupLimit();
@@ -844,17 +853,11 @@ function renderGroupPanel(group) {
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div><h2 style="margin:0;">${esc(group.name)}</h2><span class="tag-subject">${esc(group.subject)}</span></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;" class="no-print">
-        <button class="btn btn-outline" id="addManualBtn" ${locked ? 'disabled' : ''}>${t('addManualBtn')}</button>
-        <button class="btn btn-outline" id="addPhotoBtn" ${locked ? 'disabled' : ''}>${t('addPhotoBtn')}</button>
-        <button class="btn btn-outline" id="bulkImportBtn" ${locked ? 'disabled' : ''}>${t('bulkImportBtn')}</button>
+        <button class="btn btn-teal" id="addStudentMenuBtn" ${locked ? 'disabled' : ''}>${t('addStudentMenuBtn')}</button>
         <button class="btn btn-outline" id="attendanceBtn" ${locked ? 'disabled' : ''}>${t('attendanceBtn')}</button>
         <button class="btn btn-outline" id="docsBtn">${t('docsBtn')}</button>
-        <button class="btn btn-outline" id="quarterlyBtn">${t('quarterlyBtn')}</button>
-        <button class="btn btn-outline" id="excelExportBtn" ${locked ? 'disabled' : ''}>${t('exportExcelBtn')}</button>
-        <button class="btn btn-primary" id="printBtn" ${locked ? 'disabled' : ''}>${t('exportPrintBtn')}</button>
-        ${isOwner ? `<button class="btn btn-outline" id="coTeacherBtn">${t('coTeacherBtn')}</button>
-        <button class="btn btn-outline" id="editGroupBtn">${t('editGroupBtn')}</button>
-        <button class="btn btn-danger" id="deleteGroupBtn">${t('deleteGroupBtn')}</button>` : ''}
+        <button class="btn btn-outline" id="reportsMenuBtn">${t('reportsMenuBtn')}</button>
+        ${isOwner ? `<button class="btn btn-outline" id="groupSettingsBtn">${t('groupSettingsBtn')}</button>` : ''}
       </div>
     </div>
     ${locked ? `<div class="error-box" style="margin-top:12px;"><b>${t('groupLockedTitle')}</b><br>${t('groupLockedMsg')} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>` : ''}
@@ -904,30 +907,48 @@ function renderModal() {
         <button class="btn btn-teal block" id="ngSave">${t('mCreate')}</button>
       </div></div></div>`;
   }
-  if (m.type === 'addManual') {
-    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:420px;">
+  if (m.type === 'addStudent') {
+    const tab = m.tab || 'manual';
+    const tabBtn = (key, label) => `<button data-addstudenttab="${key}" class="${tab === key ? 'active' : ''}">${label}</button>`;
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:480px;">
       <h2>${t('mAddStudentTitle')}</h2>
-      <label>${t('mFioLabel')}</label><input type="text" id="amName" placeholder="${t('mFioPh')}">
-      <label>${t('mClassLabel')}</label><input type="text" id="amClass" placeholder="${t('mClassPh')}">
-      <div style="display:flex;gap:10px;margin-top:18px;">
-        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
-        <button class="btn btn-teal block" id="amSave">${t('mAdd')}</button>
-      </div></div></div>`;
-  }
-  if (m.type === 'addPhoto') {
-    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:460px;">
-      <h2>${t('mPhotoTitle')}</h2>
-      <div class="muted">${t('mPhotoDesc')}</div>
-      <div class="upload-drop" id="photoDropZone" style="margin-top:12px;">
-        <input type="file" id="photoInput" accept="image/*" style="display:none;">${t('mPickPhoto')}
-      </div>
-      <div id="photoPreviewWrap"></div>
-      <label>${t('mFioLabel')}</label><input type="text" id="apName" placeholder="${t('mFioPh')}">
-      <label>${t('mClassLabel')}</label><input type="text" id="apClass" placeholder="${t('mClassPh')}">
-      <div style="display:flex;gap:10px;margin-top:18px;">
-        <button class="btn btn-outline block" id="modalCancel">${t('mClose')}</button>
-        <button class="btn btn-teal block" id="apSave">${t('mAdd')}</button>
-      </div></div></div>`;
+      <div class="auth-tabs">${tabBtn('manual', t('tabManual'))}${tabBtn('photo', t('tabPhoto'))}${tabBtn('file', t('tabFile'))}</div>
+      ${tab === 'manual' ? `
+        <label>${t('mFioLabel')}</label><input type="text" id="amName" placeholder="${t('mFioPh')}">
+        <label>${t('mClassLabel')}</label><input type="text" id="amClass" placeholder="${t('mClassPh')}">
+        <div class="grid2">
+          <div><label>${t('birthDateLabel')}</label><input type="date" id="amBirthDate"></div>
+          <div><label>${t('addressLabel')}</label><input type="text" id="amAddress"></div>
+        </div>
+        <div style="display:flex;gap:10px;margin-top:18px;">
+          <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+          <button class="btn btn-teal block" id="amSave">${t('mAdd')}</button>
+        </div>` : ''}
+      ${tab === 'photo' ? `
+        <div class="muted" style="margin-top:12px;">${t('mPhotoDesc')}</div>
+        <div class="upload-drop" id="photoDropZone" style="margin-top:10px;">
+          <input type="file" id="photoInput" accept="image/*" style="display:none;">${t('mPickPhoto')}
+        </div>
+        <div id="photoPreviewWrap"></div>
+        <label>${t('mFioLabel')}</label><input type="text" id="apName" placeholder="${t('mFioPh')}">
+        <label>${t('mClassLabel')}</label><input type="text" id="apClass" placeholder="${t('mClassPh')}">
+        <div style="display:flex;gap:10px;margin-top:18px;">
+          <button class="btn btn-outline block" id="modalCancel">${t('mClose')}</button>
+          <button class="btn btn-teal block" id="apSave">${t('mAdd')}</button>
+        </div>` : ''}
+      ${tab === 'file' ? `
+        <div class="muted" style="margin-top:12px;">${t('mBulkDesc')}</div>
+        <div class="upload-drop" id="bulkFileDropZone" style="margin-top:10px;">
+          <input type="file" id="bulkFileInput" accept=".csv,.xlsx,.xls,.docx" style="display:none;">${t('mPickFile')}
+        </div>
+        <label>${t('mBulkClassLabel')}</label><input type="text" id="bulkClass" placeholder="${t('mClassPh')}">
+        <label>${t('mBulkNamesLabel')}</label>
+        <textarea id="bulkNamesArea" rows="7" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:13.5px;font-family:inherit;" placeholder="${t('mBulkNamesPh')}"></textarea>
+        <div style="display:flex;gap:10px;margin-top:18px;">
+          <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+          <button class="btn btn-teal block" id="bulkSave">${t('mBulkAddAll')}</button>
+        </div>` : ''}
+      </div></div>`;
   }
   if (m.type === 'addGrade') {
     return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:380px;">
@@ -942,21 +963,27 @@ function renderModal() {
         <button class="btn btn-teal block" id="agSave">${t('mSave')}</button>
       </div></div></div>`;
   }
-  if (m.type === 'bulkImport') {
-    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:520px;">
-      <h2>${t('mBulkTitle')}</h2>
-      <div class="muted">${t('mBulkDesc')}</div>
-      <div class="upload-drop" id="bulkFileDropZone" style="margin-top:12px;">
-        <input type="file" id="bulkFileInput" accept=".csv,.xlsx,.xls,.docx" style="display:none;">
-        ${t('mPickFile')}
+  if (m.type === 'reportsMenu') {
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:360px;">
+      <h2>${t('reportsMenuBtn')}</h2>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:14px;">
+        <button class="btn btn-outline block" id="quarterlyBtn">${t('quarterlyBtn')}</button>
+        <button class="btn btn-outline block" id="excelExportBtn">${t('exportExcelBtn')}</button>
+        <button class="btn btn-primary block" id="printBtn">${t('exportPrintBtn')}</button>
       </div>
-      <label>${t('mBulkClassLabel')}</label><input type="text" id="bulkClass" placeholder="${t('mClassPh')}">
-      <label>${t('mBulkNamesLabel')}</label>
-      <textarea id="bulkNamesArea" rows="8" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:13.5px;font-family:inherit;" placeholder="${t('mBulkNamesPh')}"></textarea>
-      <div style="display:flex;gap:10px;margin-top:18px;">
-        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
-        <button class="btn btn-teal block" id="bulkSave">${t('mBulkAddAll')}</button>
-      </div></div></div>`;
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:16px;">${t('mClose')}</button>
+    </div></div>`;
+  }
+  if (m.type === 'groupSettings') {
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:360px;">
+      <h2>${t('groupSettingsBtn')}</h2>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:14px;">
+        <button class="btn btn-outline block" id="openCoTeacherBtn">${t('coTeacherBtn')}</button>
+        <button class="btn btn-outline block" id="openEditGroupBtn">${t('editGroupBtn')}</button>
+        <button class="btn btn-danger block" id="openDeleteGroupBtn">${t('deleteGroupBtn')}</button>
+      </div>
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:16px;">${t('mClose')}</button>
+    </div></div>`;
   }
   if (m.type === 'notifications') {
     return `<div class="modal-bg" id="modalBg"><div class="modal">
@@ -1044,29 +1071,52 @@ function renderModal() {
       </div></div></div>`;
   }
   if (m.type === 'groupDocs') {
+    const tab = m.tab || 'workplan';
     const cats = { workplan: t('docCategoryWorkPlan'), lesson: t('docCategoryLesson') };
-    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:520px;">
+    const tabBtn = (key, label) => `<button data-docstab="${key}" class="${tab === key ? 'active' : ''}">${label}</button>`;
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:640px;">
       <h2>${t('docsTitle')}</h2>
       <div class="muted">${t('docsDesc')}</div>
-      <div class="divider"></div>
-      ${state.groupDocs.length === 0 ? `<div class="empty">${t('docEmpty')}</div>` :
-        state.groupDocs.map(d => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);">
-          <div><span class="tag-subject">${cats[d.category] || d.category}</span> <b>${esc(d.title)}</b><br><a href="${d.fileData}" download="${esc(d.fileName)}" class="muted" style="font-size:12px;">\u{1F4CE} ${esc(d.fileName)}</a></div>
-          <button class="link-btn" data-deldoc="${d.id}" style="color:var(--danger);">${t('docDelete')}</button>
-        </div>`).join('')}
-      <div class="divider"></div>
-      <label>${t('docCategoryLabel')}</label>
-      <select id="docCategory"><option value="workplan">${t('docCategoryWorkPlan')}</option><option value="lesson">${t('docCategoryLesson')}</option></select>
-      <label>${t('docTitleLabel')}</label><input type="text" id="docTitle" placeholder="${t('docTitlePh')}">
-      <label>${t('docFileLabel')}</label>
-      <div class="upload-drop" id="docDropZone" style="margin-top:6px;">
-        <input type="file" id="docFileInput" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" style="display:none;">${t('mPickFile')}
-      </div>
-      <div id="docFileNameWrap" class="muted" style="margin-top:6px;font-size:12px;"></div>
-      <div style="display:flex;gap:10px;margin-top:18px;">
-        <button class="btn btn-outline block" id="modalCancel">${t('mClose')}</button>
-        <button class="btn btn-teal block" id="docUploadBtn">${t('docUploadBtn')}</button>
-      </div></div></div>`;
+      <div class="auth-tabs" style="margin-top:14px;">${tabBtn('workplan', t('workPlanTab'))}${tabBtn('file', t('workPlanFileTab'))}</div>
+      ${tab === 'workplan' ? `
+        <div style="overflow-x:auto;margin-top:12px;">
+        <table><thead><tr><th>\u2116</th><th>${t('colTopic')}</th><th>${t('colHours')}</th><th>${t('colDate')}</th><th>${t('colNote')}</th><th></th></tr></thead><tbody>
+        ${state.workPlan.length === 0 ? `<tr><td colspan="6" class="muted" style="text-align:center;padding:14px;">${t('workPlanEmpty')}</td></tr>` :
+          state.workPlan.map((row, i) => `<tr>
+            <td>${i + 1}</td><td>${esc(row.topic)}</td><td>${esc(row.hours || '')}</td><td>${esc(row.date || '')}</td><td>${esc(row.note || '')}</td>
+            <td><button class="link-btn" data-delworkplanrow="${i}" style="color:var(--danger);">${t('deleteLink')}</button></td>
+          </tr>`).join('')}
+        </tbody></table>
+        </div>
+        <div class="divider"></div>
+        <div class="grid2">
+          <div><label>${t('workPlanTopicLabel')}</label><input type="text" id="wpTopic" placeholder="${t('workPlanTopicPh')}"></div>
+          <div><label>${t('workPlanHoursLabel')}</label><input type="text" inputmode="numeric" id="wpHours" placeholder="2"></div>
+        </div>
+        <div class="grid2">
+          <div><label>${t('workPlanDateLabel')}</label><input type="date" id="wpDate"></div>
+          <div><label>${t('workPlanNoteLabel')}</label><input type="text" id="wpNote"></div>
+        </div>
+        <button class="btn btn-teal block" id="workPlanAddBtn" style="margin-top:12px;">${t('workPlanAddRow')}</button>
+      ` : `
+        ${state.groupDocs.length === 0 ? `<div class="empty" style="margin-top:12px;">${t('docEmpty')}</div>` :
+          `<div style="margin-top:12px;">${state.groupDocs.map(d => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);">
+            <div><span class="tag-subject">${cats[d.category] || d.category}</span> <b>${esc(d.title)}</b><br><a href="${d.fileData}" download="${esc(d.fileName)}" class="muted" style="font-size:12px;">\u{1F4CE} ${esc(d.fileName)}</a></div>
+            <button class="link-btn" data-deldoc="${d.id}" style="color:var(--danger);">${t('docDelete')}</button>
+          </div>`).join('')}</div>`}
+        <div class="divider"></div>
+        <label>${t('docCategoryLabel')}</label>
+        <select id="docCategory"><option value="workplan">${t('docCategoryWorkPlan')}</option><option value="lesson">${t('docCategoryLesson')}</option></select>
+        <label>${t('docTitleLabel')}</label><input type="text" id="docTitle" placeholder="${t('docTitlePh')}">
+        <label>${t('docFileLabel')}</label>
+        <div class="upload-drop" id="docDropZone" style="margin-top:6px;">
+          <input type="file" id="docFileInput" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" style="display:none;">${t('mPickFile')}
+        </div>
+        <div id="docFileNameWrap" class="muted" style="margin-top:6px;font-size:12px;"></div>
+        <button class="btn btn-teal block" id="docUploadBtn" style="margin-top:12px;">${t('docUploadBtn')}</button>
+      `}
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:16px;">${t('mClose')}</button>
+    </div></div>`;
   }
   if (m.type === 'attendance') {
     const group = state.groups.find(g => g.id === m.groupId);
@@ -1393,16 +1443,18 @@ function attachHandlers() {
     state.modal = { type: 'newGroup' }; render();
   });
   document.querySelectorAll('[data-selectgroup]').forEach(el => el.addEventListener('click', () => {
-    state.activeGroupId = el.dataset.selectgroup; subscribeStudentsIfNeeded(); subscribeGroupDocsIfNeeded(); subscribeAttendanceIfNeeded(); render();
+    state.activeGroupId = el.dataset.selectgroup; subscribeStudentsIfNeeded(); subscribeGroupDocsIfNeeded(); subscribeAttendanceIfNeeded(); subscribeWorkPlanIfNeeded(); render();
   }));
-  document.getElementById('addManualBtn')?.addEventListener('click', () => { state.modal = { type: 'addManual' }; render(); });
-  document.getElementById('addPhotoBtn')?.addEventListener('click', () => { state.modal = { type: 'addPhoto' }; render(); });
-  document.getElementById('bulkImportBtn')?.addEventListener('click', () => { state.modal = { type: 'bulkImport' }; render(); });
-  document.getElementById('docsBtn')?.addEventListener('click', () => { state.modal = { type: 'groupDocs' }; render(); });
+  document.getElementById('addStudentMenuBtn')?.addEventListener('click', () => { state.modal = { type: 'addStudent', tab: 'manual' }; render(); });
+  document.querySelectorAll('[data-addstudenttab]').forEach(el => el.addEventListener('click', () => { state.modal.tab = el.dataset.addstudenttab; render(); }));
+  document.getElementById('docsBtn')?.addEventListener('click', () => { state.modal = { type: 'groupDocs', tab: 'workplan' }; render(); });
+  document.querySelectorAll('[data-docstab]').forEach(el => el.addEventListener('click', () => { state.modal.tab = el.dataset.docstab; render(); }));
   document.getElementById('attendanceBtn')?.addEventListener('click', () => { state.modal = { type: 'attendance', groupId: state.activeGroupId }; render(); });
-  document.getElementById('coTeacherBtn')?.addEventListener('click', () => { state.modal = { type: 'coTeachers', groupId: state.activeGroupId }; render(); });
-  document.getElementById('editGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'editGroup', groupId: state.activeGroupId }; render(); });
-  document.getElementById('deleteGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'deleteGroupConfirm', groupId: state.activeGroupId }; render(); });
+  document.getElementById('reportsMenuBtn')?.addEventListener('click', () => { state.modal = { type: 'reportsMenu' }; render(); });
+  document.getElementById('groupSettingsBtn')?.addEventListener('click', () => { state.modal = { type: 'groupSettings' }; render(); });
+  document.getElementById('openCoTeacherBtn')?.addEventListener('click', () => { state.modal = { type: 'coTeachers', groupId: state.activeGroupId }; render(); });
+  document.getElementById('openEditGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'editGroup', groupId: state.activeGroupId }; render(); });
+  document.getElementById('openDeleteGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'deleteGroupConfirm', groupId: state.activeGroupId }; render(); });
   document.getElementById('quarterlyBtn')?.addEventListener('click', () => { state.modal = { type: 'quarterly', groupId: state.activeGroupId }; render(); });
   document.getElementById('printBtn')?.addEventListener('click', () => window.print());
   document.getElementById('excelExportBtn')?.addEventListener('click', () => exportGroupToExcel());
@@ -1423,7 +1475,7 @@ function attachHandlers() {
     const subject = document.getElementById('ngSubject').value.trim();
     if (!name || !subject) { toast(t('toastFillAllFields'), 'error'); return; }
     const gid = await createGroup(state.firebaseUser.uid, name, subject);
-    state.activeGroupId = gid; subscribeStudentsIfNeeded(); subscribeGroupDocsIfNeeded(); subscribeAttendanceIfNeeded();
+    state.activeGroupId = gid; subscribeStudentsIfNeeded(); subscribeGroupDocsIfNeeded(); subscribeAttendanceIfNeeded(); subscribeWorkPlanIfNeeded();
     state.modal = null; render();
   });
 
@@ -1431,10 +1483,12 @@ function attachHandlers() {
     if (atStudentLimit(state.activeGroupId)) { toast(t('studentLimitReachedMsg'), 'error'); return; }
     const name = document.getElementById('amName').value.trim();
     const cls = document.getElementById('amClass').value.trim();
+    const birthDate = document.getElementById('amBirthDate')?.value || '';
+    const address = document.getElementById('amAddress')?.value.trim() || '';
     if (!name) { toast(t('toastEnterName'), 'error'); return; }
     const btn = document.getElementById('amSave'); btn.disabled = true;
     try {
-      await addStudent(state.firebaseUser.uid, state.activeGroupId, { fullName: name, className: cls });
+      await addStudent(state.firebaseUser.uid, state.activeGroupId, { fullName: name, className: cls, birthDate, address });
       state.modal = null; render();
     } catch (err) {
       toast(friendlyError(err), 'error');
@@ -1579,6 +1633,29 @@ function attachHandlers() {
   });
   document.querySelectorAll('[data-deldoc]').forEach(el => el.addEventListener('click', async () => {
     try { await deleteGroupDoc(el.dataset.deldoc); toast(t('docDeleted'), 'info'); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+  }));
+
+  /* Yillik ish reja jadvali */
+  document.getElementById('workPlanAddBtn')?.addEventListener('click', async () => {
+    const topic = document.getElementById('wpTopic').value.trim();
+    const hours = document.getElementById('wpHours').value.trim();
+    const date = document.getElementById('wpDate').value;
+    const note = document.getElementById('wpNote').value.trim();
+    if (!topic) { toast(t('toastFillAllFields'), 'error'); return; }
+    const newItems = [...state.workPlan, { topic, hours, date, note }];
+    try {
+      await saveWorkPlanItems(state.firebaseUser.uid, state.activeGroupId, newItems);
+      document.getElementById('wpTopic').value = '';
+      document.getElementById('wpHours').value = '';
+      document.getElementById('wpDate').value = '';
+      document.getElementById('wpNote').value = '';
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+  document.querySelectorAll('[data-delworkplanrow]').forEach(el => el.addEventListener('click', async () => {
+    const idx = parseInt(el.dataset.delworkplanrow);
+    const newItems = state.workPlan.filter((_, i) => i !== idx);
+    try { await saveWorkPlanItems(state.firebaseUser.uid, state.activeGroupId, newItems); }
     catch (err) { toast(friendlyError(err), 'error'); }
   }));
 
