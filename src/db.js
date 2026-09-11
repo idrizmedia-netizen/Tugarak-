@@ -103,10 +103,11 @@ export function watchGroupStudents(groupId, callback) {
 // to'g'ridan-to'g'ri Firestore hujjatiga saqlanadi (Spark/bepul reja bilan
 // mos ishlashi uchun). Bitta hujjat 1MB dan oshmasligi kerak, shuning uchun
 // rasm src/main.js'da yuklashdan oldin kichraytiriladi va siqiladi.
-export async function addStudent(teacherId, groupId, { fullName, className, photo, fromPhoto }) {
+export async function addStudent(teacherId, groupId, { fullName, className, photo, fromPhoto, birthDate, address }) {
   const ref = await addDoc(collection(db, 'students'), {
     teacherId, groupId, fullName, className: className || '',
     photo: photo || null, fromPhoto: !!fromPhoto,
+    birthDate: birthDate || '', address: address || '',
     grades: [], createdAt: serverTimestamp()
   });
   return ref.id;
@@ -219,6 +220,16 @@ export async function saveAttendance(teacherId, groupId, date, records) {
   await setDoc(doc(db, 'attendance', docId), {
     teacherId, groupId, date, records, updatedAt: serverTimestamp()
   }, { merge: true });
+}
+
+/* ---------- yillik ish reja (rasmiy to'garak daftari formatida: Mavzu/Soat/Sana/Izoh) ---------- */
+export function watchWorkPlan(groupId, callback) {
+  return onSnapshot(doc(db, 'workPlans', groupId), snap => {
+    callback(snap.exists() ? snap.data().items || [] : []);
+  });
+}
+export async function saveWorkPlanItems(teacherId, groupId, items) {
+  await setDoc(doc(db, 'workPlans', groupId), { teacherId, groupId, items }, { merge: true });
 }
 
 /* ---------- admin: butun tizim bo'yicha hisobotlar uchun to'liq ma'lumot ---------- */
