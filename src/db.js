@@ -152,6 +152,12 @@ export async function saveSubscriptionSettings(data) {
 export async function chooseSubscriptionPlan(uid, planKey) {
   await updateDoc(doc(db, 'users', uid), { selectedPlan: planKey, planContacted: false, planChosenAt: serverTimestamp() });
 }
+export async function cancelSubscription(uid) {
+  // Obunani bekor qilish: foydalanuvchi darhol bepul rejaga qaytadi.
+  await updateDoc(doc(db, 'users', uid), {
+    plan: 'free', planExpiresAt: null, selectedPlan: null, planContacted: false
+  });
+}
 export async function markPlanContacted(uid) {
   await updateDoc(doc(db, 'users', uid), { planContacted: true });
 }
