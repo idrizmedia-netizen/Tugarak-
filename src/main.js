@@ -9,7 +9,7 @@ import {
   watchNotifications, createNotification,
   rejectTeacher, resubmitApplication, updateTeacherProfile,
   watchSubscriptionSettings, saveSubscriptionSettings, chooseSubscriptionPlan, markPlanContacted,
-  activateSubscription, watchAds, addAd, updateAd, deleteAd,
+  activateSubscription, cancelSubscription, watchAds, addAd, updateAd, deleteAd,
   getGroupDocsOnce, addGroupDoc, deleteGroupDoc,
   getAttendanceOnce, saveAttendance,
   findApprovedTeacherByEmail, addCoTeacher, removeCoTeacher,
@@ -238,17 +238,15 @@ function sealSVG(size) {
 }
 
 /* ---------- OBUNA HOLATI VA CHEKLOVLAR ---------- */
-const GRACE_MS = 30 * 24 * 60 * 60 * 1000; // 1 oy imtiyoz muddati
-
 function getSubStatus() {
   const ud = state.userDoc;
   const plan = ud?.plan || 'free';
   if (plan === 'free') return { plan: 'free', state: 'active' };
   const expiresAtMs = ud?.planExpiresAt?.toMillis ? ud.planExpiresAt.toMillis() : null;
   if (!expiresAtMs) return { plan, state: 'active' };
-  const now = Date.now();
-  if (now <= expiresAtMs) return { plan, state: 'active', expiresAtMs };
-  if (now <= expiresAtMs + GRACE_MS) return { plan, state: 'grace', expiresAtMs, graceUntilMs: expiresAtMs + GRACE_MS };
+  // Muddat tugashi bilan darhol bepul reja cheklovlariga qaytariladi
+  // (imtiyoz muddati berilmaydi).
+  if (Date.now() <= expiresAtMs) return { plan, state: 'active', expiresAtMs };
   return { plan, state: 'expired', expiresAtMs };
 }
 function getGroupLimit() {
@@ -771,8 +769,8 @@ function renderSubscriptionView() {
     <h2 style="margin:0;">${t('subTitle')}</h2>
     <div class="muted">${t('subDesc')}</div>
     ${!sub.enabled ? `<div class="info-box" style="margin-top:12px;">${t('subDisabledNote')}</div>` : ''}
-    ${sub.enabled && myPlan !== 'free' && status.state === 'active' ? `<div class="info-box" style="margin-top:12px;">${t('subActiveUntil')} ${status.expiresAtMs ? new Date(status.expiresAtMs).toLocaleDateString() : '\u2014'}</div>` : ''}
-    ${status.state === 'grace' ? `<div class="error-box" style="margin-top:12px;">${t('subGraceBanner', { days: Math.max(0, Math.ceil((status.graceUntilMs - Date.now()) / 86400000)) })}</div>` : ''}
+    ${sub.enabled && myPlan !== 'free' && status.state === 'active' ? `<div class="info-box" style="margin-top:12px;">${t('subActiveUntil')} ${status.expiresAtMs ? new Date(status.expiresAtMs).toLocaleDateString() : '\u2014'}</div>
+    <button class="btn btn-danger" id="cancelSubBtn" style="margin-top:12px;">${t('subCancelBtn')}</button>` : ''}
     ${status.state === 'expired' ? `<div class="error-box" style="margin-top:12px;">${t('subExpiredBanner', { limit: (plans.free?.maxGroups ?? 1) })}</div>` : ''}
   </div>
   <div class="plan-grid">
@@ -820,7 +818,6 @@ function renderTeacherDash() {
   const status = getSubStatus();
   const limit = getGroupLimit();
   return `
-  ${status.state === 'grace' ? `<div class="error-box no-print" style="margin-bottom:16px;">${t('subGraceBanner', { days: Math.max(0, Math.ceil((status.graceUntilMs - Date.now()) / 86400000)) })} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>` : ''}
   ${status.state === 'expired' ? `<div class="error-box no-print" style="margin-bottom:16px;">${t('subExpiredBanner', { limit })} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>` : ''}
   <div class="card no-print">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
@@ -1419,6 +1416,16 @@ function attachHandlers() {
   });
 
   /* Obuna rejasini tanlash */
+  document.getElementById('cancelSubBtn')?.addEventListener('click', async () => {
+    if (!confirm(t('subCancelConfirm'))) return;
+    try {
+      await cancelSubscription(state.firebaseUser.uid);
+      const udoc = await getUserDoc(state.firebaseUser.uid);
+      state.userDoc = udoc;
+      toast(t('subCancelled'), 'info');
+      render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
   document.querySelectorAll('[data-chooseplan]').forEach(el => el.addEventListener('click', async () => {
     try {
       await chooseSubscriptionPlan(state.firebaseUser.uid, el.dataset.chooseplan);
