@@ -191,12 +191,22 @@ export async function deleteAd(id) {
   await deleteDoc(doc(db, 'ads', id));
 }
 
-/* ---------- ish reja / dars ishlanmasi hujjatlari (guruhga bog'liq) ---------- */
+/* ---------- ish reja / dars ishlanmasi hujjatlari (guruhga bog'liq) ----------
+   Eslatma: bu va quyidagi (davomat, ish reja) ma'lumotlar endi doimiy
+   real-vaqtli tinglovchi (onSnapshot) orqali emas, balki oyna ochilganda
+   BIR MARTA (getDocs) o'qiladi. Sabab: har guruh almashtirilganda 4-5 ta
+   tinglovchini bir vaqtda uzib-ulash Firestore SDK'sining ichki xatosini
+   ("INTERNAL ASSERTION FAILED") keltirib chiqarishi mumkin edi. */
 export function watchGroupDocs(groupId, callback) {
   const q = query(collection(db, 'groupDocs'), where('groupId', '==', groupId));
   return onSnapshot(q, snap => {
     callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
   });
+}
+export async function getGroupDocsOnce(groupId) {
+  const q = query(collection(db, 'groupDocs'), where('groupId', '==', groupId));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 export async function addGroupDoc(teacherId, groupId, { title, category, fileName, fileData }) {
   const ref = await addDoc(collection(db, 'groupDocs'), {
@@ -215,6 +225,11 @@ export function watchGroupAttendance(groupId, callback) {
     callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
   });
 }
+export async function getAttendanceOnce(groupId) {
+  const q = query(collection(db, 'attendance'), where('groupId', '==', groupId));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
 export async function saveAttendance(teacherId, groupId, date, records) {
   const docId = `${groupId}_${date}`;
   await setDoc(doc(db, 'attendance', docId), {
@@ -227,6 +242,10 @@ export function watchWorkPlan(groupId, callback) {
   return onSnapshot(doc(db, 'workPlans', groupId), snap => {
     callback(snap.exists() ? snap.data().items || [] : []);
   });
+}
+export async function getWorkPlanOnce(groupId) {
+  const snap = await getDoc(doc(db, 'workPlans', groupId));
+  return snap.exists() ? snap.data().items || [] : [];
 }
 export async function saveWorkPlanItems(teacherId, groupId, items) {
   await setDoc(doc(db, 'workPlans', groupId), { teacherId, groupId, items }, { merge: true });
