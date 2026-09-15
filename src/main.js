@@ -10,11 +10,11 @@ import {
   rejectTeacher, resubmitApplication, updateTeacherProfile,
   watchSubscriptionSettings, saveSubscriptionSettings, chooseSubscriptionPlan, markPlanContacted,
   activateSubscription, watchAds, addAd, updateAd, deleteAd,
-  watchGroupDocs, addGroupDoc, deleteGroupDoc,
-  watchGroupAttendance, saveAttendance,
+  getGroupDocsOnce, addGroupDoc, deleteGroupDoc,
+  getAttendanceOnce, saveAttendance,
   findApprovedTeacherByEmail, addCoTeacher, removeCoTeacher,
   watchAllGroupsAdmin, watchAllStudentsAdmin,
-  watchWorkPlan, saveWorkPlanItems
+  getWorkPlanOnce, saveWorkPlanItems
 } from './db.js';
 import { auth } from './firebase.js';
 import { parseRosterFile } from './importParsers.js';
@@ -70,7 +70,7 @@ let state = {
   allStudentsAdmin: [],
 };
 
-let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubGroupDocs = null, unsubAttendance = null, unsubWorkPlan = null, unsubAllGroupsAdmin = null, unsubAllStudentsAdmin = null;
+let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubAllGroupsAdmin = null, unsubAllStudentsAdmin = null;
 const uid = () => 'x' + Math.random().toString(36).slice(2, 9);
 
 function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -115,9 +115,6 @@ watchAuth(async (user) => {
   if (unsubNotifications) { unsubNotifications(); unsubNotifications = null; }
   if (unsubSubscription) { unsubSubscription(); unsubSubscription = null; }
   if (unsubAds) { unsubAds(); unsubAds = null; }
-  if (unsubGroupDocs) { unsubGroupDocs(); unsubGroupDocs = null; }
-  if (unsubAttendance) { unsubAttendance(); unsubAttendance = null; }
-  if (unsubWorkPlan) { unsubWorkPlan(); unsubWorkPlan = null; }
   if (unsubAllGroupsAdmin) { unsubAllGroupsAdmin(); unsubAllGroupsAdmin = null; }
   if (unsubAllStudentsAdmin) { unsubAllStudentsAdmin(); unsubAllStudentsAdmin = null; }
 
@@ -157,8 +154,7 @@ watchAuth(async (user) => {
       state.groups = list;
       if (!state.activeGroupId && list.length) state.activeGroupId = list[0].id;
       subscribeStudentsIfNeeded();
-      subscribeGroupDocsIfNeeded();
-      subscribeAttendanceIfNeeded(); subscribeWorkPlanIfNeeded();
+      loadGroupExtrasOnce();
       render();
     });
   } else {
@@ -173,23 +169,19 @@ function subscribeStudentsIfNeeded() {
     unsubStudents = watchGroupStudents(state.activeGroupId, list => { state.students = list; render(); });
   }
 }
-function subscribeGroupDocsIfNeeded() {
-  if (unsubGroupDocs) { unsubGroupDocs(); unsubGroupDocs = null; }
-  if (state.activeGroupId) {
-    unsubGroupDocs = watchGroupDocs(state.activeGroupId, list => { state.groupDocs = list; render(); });
-  }
+async function loadGroupDocsOnce() {
+  state.groupDocs = state.activeGroupId ? await getGroupDocsOnce(state.activeGroupId) : [];
 }
-function subscribeAttendanceIfNeeded() {
-  if (unsubAttendance) { unsubAttendance(); unsubAttendance = null; }
-  if (state.activeGroupId) {
-    unsubAttendance = watchGroupAttendance(state.activeGroupId, list => { state.attendance = list; render(); });
-  }
+async function loadAttendanceOnce() {
+  state.attendance = state.activeGroupId ? await getAttendanceOnce(state.activeGroupId) : [];
 }
-function subscribeWorkPlanIfNeeded() {
-  if (unsubWorkPlan) { unsubWorkPlan(); unsubWorkPlan = null; }
-  if (state.activeGroupId) {
-    unsubWorkPlan = watchWorkPlan(state.activeGroupId, items => { state.workPlan = items; render(); });
-  }
+async function loadWorkPlanOnce() {
+  state.workPlan = state.activeGroupId ? await getWorkPlanOnce(state.activeGroupId) : [];
+}
+function loadGroupExtrasOnce() {
+  Promise.all([loadGroupDocsOnce(), loadAttendanceOnce(), loadWorkPlanOnce()])
+    .then(render)
+    .catch(err => console.error('Guruh qo\u2019shimcha ma\u2019lumotlarini yuklashda xato:', err));
 }
 
 /* ================= RENDER ================= */
@@ -823,7 +815,7 @@ function renderTeacherDash() {
   if (activeGroup && state.activeGroupId !== activeGroup.id) {
     state.activeGroupId = activeGroup.id;
     subscribeStudentsIfNeeded();
-    subscribeGroupDocsIfNeeded(); subscribeAttendanceIfNeeded(); subscribeWorkPlanIfNeeded();
+    loadGroupExtrasOnce();
   }
   const status = getSubStatus();
   const limit = getGroupLimit();
@@ -1443,7 +1435,7 @@ function attachHandlers() {
     state.modal = { type: 'newGroup' }; render();
   });
   document.querySelectorAll('[data-selectgroup]').forEach(el => el.addEventListener('click', () => {
-    state.activeGroupId = el.dataset.selectgroup; subscribeStudentsIfNeeded(); subscribeGroupDocsIfNeeded(); subscribeAttendanceIfNeeded(); subscribeWorkPlanIfNeeded(); render();
+    state.activeGroupId = el.dataset.selectgroup; subscribeStudentsIfNeeded(); loadGroupExtrasOnce(); render();
   }));
   document.getElementById('addStudentMenuBtn')?.addEventListener('click', () => { state.modal = { type: 'addStudent', tab: 'manual' }; render(); });
   document.querySelectorAll('[data-addstudenttab]').forEach(el => el.addEventListener('click', () => { state.modal.tab = el.dataset.addstudenttab; render(); }));
@@ -1475,7 +1467,7 @@ function attachHandlers() {
     const subject = document.getElementById('ngSubject').value.trim();
     if (!name || !subject) { toast(t('toastFillAllFields'), 'error'); return; }
     const gid = await createGroup(state.firebaseUser.uid, name, subject);
-    state.activeGroupId = gid; subscribeStudentsIfNeeded(); subscribeGroupDocsIfNeeded(); subscribeAttendanceIfNeeded(); subscribeWorkPlanIfNeeded();
+    state.activeGroupId = gid; subscribeStudentsIfNeeded(); loadGroupExtrasOnce();
     state.modal = null; render();
   });
 
@@ -1588,12 +1580,9 @@ function attachHandlers() {
   document.getElementById('deleteGroupConfirmBtn')?.addEventListener('click', async () => {
     const gid = state.modal.groupId;
     try {
-      // O'chirishdan oldin shu guruhga tegishli faol tinglovchilarni to'xtatamiz
+      // O'chirishdan oldin shu guruhga tegishli faol tinglovchini to'xtatamiz
       // (aks holda o'chirilgan hujjatga onSnapshot xato berishi mumkin).
-      if (state.activeGroupId === gid) {
-        if (unsubStudents) { unsubStudents(); unsubStudents = null; }
-        if (unsubGroupDocs) { unsubGroupDocs(); unsubGroupDocs = null; }
-      }
+      if (state.activeGroupId === gid && unsubStudents) { unsubStudents(); unsubStudents = null; }
       await deleteGroup(gid);
       if (state.activeGroupId === gid) state.activeGroupId = null;
       toast(t('groupDeleted'), 'info');
@@ -1627,12 +1616,13 @@ function attachHandlers() {
         title, category, fileName: selectedDocName, fileData: selectedDocBase64
       });
       selectedDocBase64 = null; selectedDocName = '';
+      await loadGroupDocsOnce();
       toast(t('docUploaded'), 'info');
       render();
     } catch (err) { toast(friendlyError(err), 'error'); }
   });
   document.querySelectorAll('[data-deldoc]').forEach(el => el.addEventListener('click', async () => {
-    try { await deleteGroupDoc(el.dataset.deldoc); toast(t('docDeleted'), 'info'); }
+    try { await deleteGroupDoc(el.dataset.deldoc); await loadGroupDocsOnce(); toast(t('docDeleted'), 'info'); render(); }
     catch (err) { toast(friendlyError(err), 'error'); }
   }));
 
@@ -1646,6 +1636,8 @@ function attachHandlers() {
     const newItems = [...state.workPlan, { topic, hours, date, note }];
     try {
       await saveWorkPlanItems(state.firebaseUser.uid, state.activeGroupId, newItems);
+      state.workPlan = newItems;
+      render();
       document.getElementById('wpTopic').value = '';
       document.getElementById('wpHours').value = '';
       document.getElementById('wpDate').value = '';
@@ -1655,7 +1647,7 @@ function attachHandlers() {
   document.querySelectorAll('[data-delworkplanrow]').forEach(el => el.addEventListener('click', async () => {
     const idx = parseInt(el.dataset.delworkplanrow);
     const newItems = state.workPlan.filter((_, i) => i !== idx);
-    try { await saveWorkPlanItems(state.firebaseUser.uid, state.activeGroupId, newItems); }
+    try { await saveWorkPlanItems(state.firebaseUser.uid, state.activeGroupId, newItems); state.workPlan = newItems; render(); }
     catch (err) { toast(friendlyError(err), 'error'); }
   }));
 
@@ -1671,6 +1663,7 @@ function attachHandlers() {
     });
     try {
       await saveAttendance(state.firebaseUser.uid, state.activeGroupId, date, records);
+      await loadAttendanceOnce();
       toast(t('attendanceSaved'), 'info');
       state.modal = null; render();
     } catch (err) { toast(friendlyError(err), 'error'); }
