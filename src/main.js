@@ -761,7 +761,7 @@ function renderSubscriptionView() {
       <ul class="plan-features">
         ${(p.features || []).map(f => `<li><span>\u2705</span><span>${esc(f)}</span></li>`).join('') || `<li class="muted">\u2014</li>`}
       </ul>
-      ${isCurrent ? `<div class="pill approved">${t('subCurrent')}</div>` : `<button class="btn ${key === 'yearly' ? 'btn-primary' : key === 'monthly' ? 'btn-teal' : 'btn-outline'} block" data-chooseplan="${key}">${t('subChoose')}</button>`}
+      ${isCurrent ? `<div class="pill approved" style="margin-bottom:8px;">${t('subCurrent')}</div>${key !== 'free' ? `<button class="btn btn-outline block" data-chooseplan="${key}">${t('subRenewBtn')}</button>` : ''}` : `<button class="btn ${key === 'yearly' ? 'btn-primary' : key === 'monthly' ? 'btn-teal' : 'btn-outline'} block" data-chooseplan="${key}">${t('subChoose')}</button>`}
     </div>`;
   };
   return `
