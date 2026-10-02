@@ -1,8 +1,18 @@
 import {
   collection, doc, addDoc, updateDoc, deleteDoc, getDocs, getDoc, setDoc,
-  query, where, orderBy, onSnapshot, serverTimestamp, arrayUnion, arrayRemove, deleteField, Timestamp
+  query, where, orderBy, onSnapshot as _onSnapshot, serverTimestamp, arrayUnion, arrayRemove, deleteField, Timestamp
 } from 'firebase/firestore';
 import { db } from './firebase.js';
+
+// Barcha real-vaqt tinglovchilar uchun xato ishlovchisi. Xato ishlovchisi bo'lmasa,
+// permission-denied kabi xatolar "Uncaught" bo'lib qoladi va Firestore SDK'ning
+// ichki holatini buzib (INTERNAL ASSERTION FAILED), keyingi so'rovlarni ham to'xtatadi.
+function onSnapshot(ref, next, onError) {
+  return _onSnapshot(ref, next, err => {
+    console.warn('Firestore tinglovchi xatosi:', err.code, err.message);
+    if (onError) onError(err);
+  });
+}
 
 /* ---------- users (teachers) ---------- */
 export function watchAllTeachers(callback) {
