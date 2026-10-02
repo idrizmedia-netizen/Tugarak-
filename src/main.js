@@ -107,7 +107,10 @@ window.addEventListener('beforeinstallprompt', (e) => {
 });
 window.addEventListener('appinstalled', () => { deferredInstallPrompt = null; render(); });
 
+let authRun = 0;
 watchAuth(async (user) => {
+  const run = ++authRun;
+  const stale = () => run !== authRun;
   state.firebaseUser = user;
   if (unsubTeachers) { unsubTeachers(); unsubTeachers = null; }
   if (unsubGroups) { unsubGroups(); unsubGroups = null; }
@@ -133,6 +136,7 @@ watchAuth(async (user) => {
   unsubAds = watchAds(list => { state.ads = list; render(); });
 
   const admin = await isAdmin(user.uid, user.email);
+  if (stale()) return;
   if (admin) {
     state.role = 'admin';
     state.view = 'adminDash';
@@ -145,6 +149,7 @@ watchAuth(async (user) => {
 
   state.role = 'teacher';
   const udoc = await getUserDoc(user.uid);
+  if (stale()) return;
   state.userDoc = udoc;
   if (!udoc) { state.view = 'teacherAuth'; render(); return; }
   if (udoc.status === 'incomplete') { state.view = 'googleComplete'; render(); return; }
