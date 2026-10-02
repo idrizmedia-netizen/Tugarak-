@@ -103,9 +103,21 @@ export function watchAuth(callback) {
 }
 
 export async function isAdmin(uid, email) {
-  if (email && ADMIN_EMAILS.includes(email.toLowerCase())) return true;
-  const snap = await getDoc(doc(db, 'admins', uid));
-  return snap.exists();
+  let hasDoc = false;
+  try {
+    const snap = await getDoc(doc(db, 'admins', uid));
+    hasDoc = snap.exists();
+  } catch (e) {
+    console.warn('admins hujjatini o\u2019qib bo\u2019lmadi:', e.code || e);
+  }
+  if (hasDoc) return true;
+  if (email && ADMIN_EMAILS.includes(email.toLowerCase())) {
+    // Firestore qoidalari faqat admins/{uid} hujjatini tan oladi. Hujjat bo'lmasa,
+    // admin panelidagi barcha so'rovlar "permission-denied" xatosini beradi.
+    console.warn('Diqqat: bu email VITE_ADMIN_EMAILS da bor, lekin Firestore\'da admins/' + uid + ' hujjati yo\u2019q. Uni yarating.');
+    return true;
+  }
+  return false;
 }
 
 export async function getUserDoc(uid) {
