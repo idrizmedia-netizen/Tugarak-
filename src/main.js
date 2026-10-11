@@ -1,7 +1,8 @@
 import './styles.css';
 import {
   watchAuth, registerTeacher, loginTeacher, loginWithGoogle, completeGoogleRegistration,
-  resetPassword, logout, isAdmin, getUserDoc, getLockInfo, registerFail, clearFails
+  resetPassword, logout, isAdmin, getUserDoc, getLockInfo, registerFail, clearFails,
+  waitForRegistration, ensureGoogleUserDoc, isGoogleUser, handleRedirectResult
 } from './auth.js';
 import {
   watchAllTeachers, setTeacherStatus, watchMyGroups, createGroup, updateGroup, deleteGroup,
@@ -14,7 +15,8 @@ import {
   getAttendanceOnce, saveAttendance,
   findApprovedTeacherByEmail, addCoTeacher, removeCoTeacher,
   watchAllGroupsAdmin, watchAllStudentsAdmin,
-  getWorkPlanOnce, saveWorkPlanItems
+  getWorkPlanOnce, saveWorkPlanItems,
+  addStudentsBatch, syncTeacherDirectory
 } from './db.js';
 import { auth } from './firebase.js';
 import { parseRosterFile } from './importParsers.js';
@@ -71,13 +73,72 @@ let state = {
 };
 
 let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubAllGroupsAdmin = null, unsubAllStudentsAdmin = null;
+let syncedGroupId = null, extrasRun = 0, directoryBackfillStarted = false;
+
+/** Foydalanuvchi almashganda/chiqqanda oldingi akkaunt ma'lumotlari xotirada qolib ketmasligi uchun. */
+function resetSessionState() {
+  syncedGroupId = null; extrasRun++;
+  state.teachers = []; state.groups = []; state.students = []; state.activeGroupId = null;
+  state.notifications = []; state.ads = []; state.groupDocs = []; state.attendance = []; state.workPlan = [];
+  state.allGroupsAdmin = []; state.allStudentsAdmin = []; state.modal = null; state.adDismissed = false;
+}
+
+/** Admin birinchi marta kirganda tasdiqlangan o'qituvchilarni hamkor-qidiruv katalogiga bir martalik ko'chiradi. */
+async function backfillDirectoryOnce(list) {
+  if (directoryBackfillStarted) return;
+  try { if (localStorage.getItem('dirBackfill:v1')) return; } catch (e) { /* e'tiborsiz */ }
+  const approved = list.filter(tc => tc.status === 'approved');
+  if (!approved.length) return;
+  directoryBackfillStarted = true;
+  try {
+    await syncTeacherDirectory(approved);
+    try { localStorage.setItem('dirBackfill:v1', '1'); } catch (e) { /* e'tiborsiz */ }
+  } catch (e) {
+    directoryBackfillStarted = false;
+    console.warn('Hamkor katalogini yangilab bo\u2019lmadi:', e);
+  }
+}
 const uid = () => 'x' + Math.random().toString(36).slice(2, 9);
 
-function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function esc(s) { return (s ?? '').toString().replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+/* ---------- XAVFSIZLIK YORDAMCHILARI ----------
+   Firestore'dan kelgan HAR QANDAY qiymat (rasm, fayl, havola, baho) HTML'ga qo'yilishidan oldin
+   shulardan o'tishi kerak. Avval proofDocs/photo/fileData/ad.link/grade.value tekshirilmasdan
+   qo'yilardi: zararli foydalanuvchi atribut ichiga kod yozib, admin brauzerida ishlatishi mumkin edi. */
+function num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
+/** Faqat data:image/... ko'rinishidagi rasm; aks holda bo'sh satr. */
+function safeImgSrc(v) {
+  return (typeof v === 'string' && /^data:image\/(png|jpe?g|webp|gif);base64,/.test(v)) ? esc(v) : '';
+}
+/** Yuklab olinadigan hujjat uchun faqat data: havola (HTML/JS turlari emas). */
+function safeFileHref(v) {
+  return (typeof v === 'string' && /^data:(application\/(pdf|msword|octet-stream|vnd\.openxmlformats-officedocument\.wordprocessingml\.document)|image\/(png|jpe?g));base64,/i.test(v)) ? esc(v) : '#';
+}
+/** Faqat http/https havolalar (javascript: va boshqalarni o'tkazmaydi). */
+function safeHttpUrl(u) {
+  try {
+    const x = new URL(String(u || ''), location.origin);
+    return /^https?:$/.test(x.protocol) ? x.href : '#';
+  } catch (e) { return '#'; }
+}
+/** Mahalliy (UTC emas!) sana: YYYY-MM-DD. toISOString() Toshkentda 00:00-05:00 oralig'ida kechagi sanani berardi. */
+function localDateStr(d) {
+  d = d || new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+/** Joriy o'quv yili (1-sentabrdan 31-avgustgacha) chegaralari, millisekundda. */
+function academicYearRange() {
+  const now = new Date();
+  const y = now.getMonth() >= 8 ? now.getFullYear() : now.getFullYear() - 1;
+  return { start: new Date(y, 8, 1).getTime(), end: new Date(y + 1, 8, 1).getTime() };
+}
 
 function friendlyError(err) {
   const code = err?.code || '';
   const map = {
+    'app/in-app-browser': t('errInApp'),
+    'app/invalid': t('errInvalid'),
     'auth/user-not-found': t('errUserNotFound'),
     'auth/wrong-password': t('errWrongPassword'),
     'auth/invalid-credential': t('errInvalidCredential'),
@@ -85,9 +146,18 @@ function friendlyError(err) {
     'auth/weak-password': t('errWeakPassword'),
     'auth/invalid-email': t('errInvalidEmail'),
     'auth/too-many-requests': t('errTooMany'),
-    'auth/popup-closed-by-user': t('errPopupClosed')
+    'auth/popup-closed-by-user': t('errPopupClosed'),
+    'auth/popup-blocked': t('errPopupClosed'),
+    'auth/cancelled-popup-request': t('errPopupClosed'),
+    'auth/network-request-failed': t('errNetwork'),
+    'auth/unauthorized-domain': t('errUnauthorizedDomain'),
+    'auth/user-disabled': t('errUserDisabled'),
+    'unavailable': t('errNetwork'),
+    'permission-denied': t('errPermission'),
   };
-  return map[code] || (err?.message || t('errGeneric'));
+  if (!map[code]) console.warn('Xato:', err);
+  // Ichki xato matnlari (err.message) foydalanuvchiga ko'rsatilmaydi.
+  return map[code] || t('errGeneric');
 }
 
 function toast(msg, kind) {
@@ -120,6 +190,7 @@ watchAuth(async (user) => {
   if (unsubAds) { unsubAds(); unsubAds = null; }
   if (unsubAllGroupsAdmin) { unsubAllGroupsAdmin(); unsubAllGroupsAdmin = null; }
   if (unsubAllStudentsAdmin) { unsubAllStudentsAdmin(); unsubAllStudentsAdmin = null; }
+  resetSessionState();
 
   if (!user) {
     state.role = null; state.userDoc = null; state.notifications = [];
@@ -135,12 +206,15 @@ watchAuth(async (user) => {
   unsubSubscription = watchSubscriptionSettings(sub => { state.subscription = sub; render(); });
   unsubAds = watchAds(list => { state.ads = list; render(); });
 
-  const admin = await isAdmin(user.uid, user.email);
+  // Yangi ro'yxatdan o'tgan foydalanuvchining profili yozilib bo'lguncha kutamiz (poyga holati).
+  await waitForRegistration();
+  if (stale()) return;
+  const admin = await isAdmin(user.uid);
   if (stale()) return;
   if (admin) {
     state.role = 'admin';
     state.view = 'adminDash';
-    unsubTeachers = watchAllTeachers(list => { state.teachers = list; render(); });
+    unsubTeachers = watchAllTeachers(list => { state.teachers = list; backfillDirectoryOnce(list); render(); });
     unsubAllGroupsAdmin = watchAllGroupsAdmin(list => { state.allGroupsAdmin = list; render(); });
     unsubAllStudentsAdmin = watchAllStudentsAdmin(list => { state.allStudentsAdmin = list; render(); });
     render();
@@ -148,18 +222,31 @@ watchAuth(async (user) => {
   }
 
   state.role = 'teacher';
-  const udoc = await getUserDoc(user.uid);
+  let udoc = await getUserDoc(user.uid);
   if (stale()) return;
+  if (!udoc && isGoogleUser(user)) {
+    // Google orqali birinchi kirish: boshlang'ich hujjat shu yerda yaratiladi (admin emasligi tekshirilgan).
+    try { udoc = await ensureGoogleUserDoc(user); }
+    catch (e) { console.error('Google profili yaratilmadi:', e); }
+    if (stale()) return;
+  }
+  if (!udoc) {
+    // Profili yo'q hisob (masalan, ro'yxatdan o'tish uzilgan) — bo'sh panel ko'rsatmasdan chiqarib yuboramiz.
+    toast(t('errGeneric'), 'error');
+    await logout();
+    return;
+  }
   state.userDoc = udoc;
-  if (!udoc) { state.view = 'teacherAuth'; render(); return; }
   if (udoc.status === 'incomplete') { state.view = 'googleComplete'; render(); return; }
   if (udoc.status === 'approved') {
     if (state.view !== 'subscription') state.view = 'teacherDash';
     unsubGroups = watchMyGroups(user.uid, list => {
       state.groups = list;
-      if (!state.activeGroupId && list.length) state.activeGroupId = list[0].id;
-      subscribeStudentsIfNeeded();
-      loadGroupExtrasOnce();
+      // Faol guruh yo'q bo'lsa yoki o'chirilgan bo'lsa — birinchisini tanlaymiz.
+      if (!state.activeGroupId || !list.some(g => g.id === state.activeGroupId)) {
+        state.activeGroupId = list.length ? list[0].id : null;
+      }
+      syncActiveGroup(); // faqat faol guruh O'ZGARGANDA qayta obuna bo'ladi (ortiqcha o'qishlar yo'q)
       render();
     });
   } else {
@@ -172,25 +259,78 @@ function subscribeStudentsIfNeeded() {
   if (unsubStudents) { unsubStudents(); unsubStudents = null; }
   if (state.activeGroupId) {
     unsubStudents = watchGroupStudents(state.activeGroupId, list => { state.students = list; render(); });
+  } else {
+    state.students = [];
   }
 }
+// Har bir yuklash natijasi faqat shu paytda ham faol bo'lgan guruhga yoziladi —
+// guruhlar tez almashtirilganda eski guruh ma'lumoti yangisining ustiga yozilib qolmaydi.
 async function loadGroupDocsOnce() {
-  state.groupDocs = state.activeGroupId ? await getGroupDocsOnce(state.activeGroupId) : [];
+  const gid = state.activeGroupId;
+  const docs = gid ? await getGroupDocsOnce(gid) : [];
+  if (gid === state.activeGroupId) state.groupDocs = docs;
 }
 async function loadAttendanceOnce() {
-  state.attendance = state.activeGroupId ? await getAttendanceOnce(state.activeGroupId) : [];
+  const gid = state.activeGroupId;
+  const list = gid ? await getAttendanceOnce(gid) : [];
+  if (gid === state.activeGroupId) state.attendance = list;
 }
 async function loadWorkPlanOnce() {
-  state.workPlan = state.activeGroupId ? await getWorkPlanOnce(state.activeGroupId) : [];
+  const gid = state.activeGroupId;
+  const items = gid ? await getWorkPlanOnce(gid) : [];
+  if (gid === state.activeGroupId) state.workPlan = items;
 }
 function loadGroupExtrasOnce() {
-  Promise.all([loadGroupDocsOnce(), loadAttendanceOnce(), loadWorkPlanOnce()])
-    .then(render)
+  const run = ++extrasRun;
+  // Hujjatlar (katta base64 fayllar) faqat "Hujjatlar" oynasi ochilganda yuklanadi — ortiqcha o'qish yo'q.
+  state.groupDocs = []; state.attendance = []; state.workPlan = [];
+  Promise.all([loadAttendanceOnce(), loadWorkPlanOnce()])
+    .then(() => { if (run === extrasRun) render(); })
     .catch(err => console.error('Guruh qo\u2019shimcha ma\u2019lumotlarini yuklashda xato:', err));
+}
+function syncActiveGroup() {
+  if (state.activeGroupId === syncedGroupId) return;
+  syncedGroupId = state.activeGroupId;
+  subscribeStudentsIfNeeded();
+  loadGroupExtrasOnce();
 }
 
 /* ================= RENDER ================= */
+/* Har bir Firestore yangilanishi (yangi o'quvchi, bildirishnoma, reklama...) butun sahifani qayta chizadi.
+   Avval shu paytda ochiq turgan oynadagi yozilayotgan matn (ism, izoh, narx...) o'chib ketardi.
+   Endi qayta chizishdan oldin id'si bor maydonlar qiymati va fokus saqlanib, keyin tiklanadi. */
+function captureFormState() {
+  const snap = {};
+  document.querySelectorAll('#app input[id], #app textarea[id], #app select[id]').forEach(el => {
+    if (el.type === 'file') return;
+    snap[el.id] = el.type === 'checkbox' || el.type === 'radio' ? { checked: el.checked } : { value: el.value };
+  });
+  const ae = document.activeElement;
+  const active = ae && ae.id && snap[ae.id]
+    ? { id: ae.id, start: ae.selectionStart ?? null, end: ae.selectionEnd ?? null } : null;
+  return { snap, active };
+}
+function restoreFormState({ snap, active }) {
+  for (const id in snap) {
+    const el = document.getElementById(id);
+    if (!el || el.type === 'file') continue;
+    if ('checked' in snap[id]) el.checked = snap[id].checked;
+    else if (el.value !== snap[id].value) el.value = snap[id].value;
+  }
+  if (active) {
+    const el = document.getElementById(active.id);
+    if (el) {
+      el.focus({ preventScroll: true });
+      try { if (active.start !== null) el.setSelectionRange(active.start, active.end); } catch (e) { /* date/email kabi turlarda yo'q */ }
+    }
+  }
+}
 function render() {
+  const saved = captureFormState();
+  renderInner();
+  restoreFormState(saved);
+}
+function renderInner() {
   const app = document.getElementById('app');
   document.body.classList.toggle('dark', state.theme === 'dark');
 
@@ -261,10 +401,12 @@ function getGroupLimit() {
   const limit = plans[key]?.maxGroups;
   return typeof limit === 'number' ? limit : 0; // 0 = cheksiz
 }
+function ownGroups() { return state.groups.filter(g => g.teacherId === state.firebaseUser?.uid); }
 function sortedGroupsForLimit() {
-  return [...state.groups].sort((a, b) => (a.createdAt?.toMillis?.() || 0) - (b.createdAt?.toMillis?.() || 0));
+  return [...ownGroups()].sort((a, b) => (a.createdAt?.toMillis?.() || 0) - (b.createdAt?.toMillis?.() || 0));
 }
 function isGroupLocked(group) {
+  if (group.teacherId !== state.firebaseUser?.uid) return false; // hamkor sifatida qo'shilgan guruh egasining rejasiga bog'liq
   const limit = getGroupLimit();
   if (!limit) return false;
   const sorted = sortedGroupsForLimit();
@@ -274,7 +416,7 @@ function isGroupLocked(group) {
 function atGroupLimit() {
   const limit = getGroupLimit();
   if (!limit) return false;
-  return state.groups.length >= limit;
+  return ownGroups().length >= limit;
 }
 function getStudentLimit() {
   const status = getSubStatus();
@@ -473,7 +615,7 @@ function renderAdminDash() {
 
   // Eng faol o'qituvchilar: guruhlar soni bo'yicha reyting
   const groupCountByTeacher = {};
-  state.groups.forEach(g => { groupCountByTeacher[g.teacherId] = (groupCountByTeacher[g.teacherId] || 0) + 1; });
+  state.allGroupsAdmin.forEach(g => { groupCountByTeacher[g.teacherId] = (groupCountByTeacher[g.teacherId] || 0) + 1; });
   const topTeachers = approved
     .map(tc => ({ ...tc, groupCount: groupCountByTeacher[tc.id] || 0 }))
     .sort((a, b) => b.groupCount - a.groupCount)
@@ -501,8 +643,8 @@ function renderAdminDash() {
   <div class="card">
     <h2>${t('statsTitle')}</h2>
     <div class="stat-grid" style="margin:14px 0;grid-template-columns:repeat(2,1fr);">
-      <div class="stat-card"><div class="num">${state.groups.length}</div><div class="lbl">${t('statsGroups')}</div></div>
-      <div class="stat-card"><div class="num">${state.students.length}</div><div class="lbl">${t('statsStudents')}</div></div>
+      <div class="stat-card"><div class="num">${state.allGroupsAdmin.length}</div><div class="lbl">${t('statsGroups')}</div></div>
+      <div class="stat-card"><div class="num">${state.allStudentsAdmin.length}</div><div class="lbl">${t('statsStudents')}</div></div>
     </div>
     <div class="divider"></div>
     <h3 style="font-size:14px;margin:0 0 10px;">${t('mostActiveTitle')}</h3>
@@ -531,7 +673,7 @@ function renderAdminDash() {
         <div><b>${esc(tc.fullName)}</b> <span class="pill pending">${t('pendingPill')}</span><br>
         <span class="muted">${esc(tc.email)} \u00B7 ${esc(tc.phone || '')} \u00B7 ${tc.contractAccepted ? t('contractOk') : t('contractNo')}</span>
         ${tc.resubmitReason ? `<div class="info-box" style="margin-top:6px;font-size:12px;">\u{1F504} ${esc(tc.resubmitReason)}</div>` : ''}
-        ${tc.proofDocs?.length ? `<div style="margin-top:6px;">${tc.proofDocs.map(p => `<img src="${p}" style="width:50px;height:50px;object-fit:cover;border-radius:6px;border:1px solid var(--line);margin-right:4px;">`).join('')}</div>` : ''}
+        ${tc.proofDocs?.length ? `<div style="margin-top:6px;">${tc.proofDocs.map(p => `<img src="${safeImgSrc(p)}" style="width:50px;height:50px;object-fit:cover;border-radius:6px;border:1px solid var(--line);margin-right:4px;">`).join('')}</div>` : ''}
         </div>
         <div style="display:flex;gap:8px;">
           <button class="btn btn-teal" data-approve="${tc.id}">${t('approve')}</button>
@@ -613,7 +755,7 @@ function renderAdminReportsView() {
 }
 
 function renderAdminAdsView() {
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = localDateStr();
   return `<div class="card">
     <h2>${t('adsAdminTitle')}</h2>
     <div class="muted">${t('adsAdminDesc')}</div>
@@ -640,11 +782,11 @@ function renderAdminAdsView() {
         const isLive = isAdCurrentlyActive(ad);
         return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:10px;">
-          ${ad.image ? `<img src="${ad.image}" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--line);">` : ''}
+          ${ad.image ? `<img src="${safeImgSrc(ad.image)}" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--line);">` : ''}
           <div>
             <b>${esc(ad.title || '')}</b> <span class="pill ${isLive ? 'approved' : 'pending'}">${isLive ? t('adsLive') : t('adsNotLive')}</span><br>
             <span class="muted" style="font-size:12px;">${esc((ad.text || '').slice(0, 60))}</span><br>
-            <span class="muted" style="font-size:11px;">${ad.startDate || '\u2014'} \u2192 ${ad.endDate || t('adsNoEndDate')}</span>
+            <span class="muted" style="font-size:11px;">${esc(ad.startDate || '\u2014')} \u2192 ${esc(ad.endDate || t('adsNoEndDate'))}</span>
           </div>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
@@ -658,7 +800,7 @@ function renderAdminAdsView() {
 
 function isAdCurrentlyActive(ad) {
   if (!ad.enabled) return false;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateStr();
   if (ad.startDate && today < ad.startDate) return false;
   if (ad.endDate && today > ad.endDate) return false;
   return true;
@@ -670,8 +812,8 @@ function renderTopAdCarousel() {
   return `<div class="ad-carousel no-print" id="adCarousel">
     <button class="ad-carousel-close" id="adCarouselClose" aria-label="Yopish">\u2715</button>
     <div class="ad-carousel-track" id="adBannerTrack">
-      ${active.map(ad => `<a class="ad-slide" href="${ad.link ? esc(ad.link) : '#'}" target="${ad.link ? '_blank' : '_self'}" rel="noopener">
-        ${ad.image ? `<img class="ad-slide-thumb" src="${ad.image}">` : ''}
+      ${active.map(ad => `<a class="ad-slide" href="${esc(safeHttpUrl(ad.link))}" target="${ad.link ? '_blank' : '_self'}" rel="noopener noreferrer">
+        ${ad.image ? `<img class="ad-slide-thumb" src="${safeImgSrc(ad.image)}">` : ''}
         <div class="ad-slide-body">
           <span class="ad-slide-label">${t('adsBannerLabel')}</span>
           <div class="ad-slide-title">${esc(ad.title || '')}</div>
@@ -762,7 +904,7 @@ function renderSubscriptionView() {
         ${key === 'free' ? t('subFree') : fmt(finalPrice)}
         ${key !== 'free' ? `<span style="font-size:13px;color:var(--ink-soft);font-weight:600;">${key === 'monthly' ? t('subPricePerMonth') : t('subPricePerYear')}</span>` : ''}
       </div>
-      ${p.discount ? `<div class="pill approved">-${p.discount}% ${t('subDiscount')}</div>` : '<div style="height:24px;"></div>'}
+      ${p.discount ? `<div class="pill approved">-${num(p.discount)}% ${t('subDiscount')}</div>` : '<div style="height:24px;"></div>'}
       <ul class="plan-features">
         ${(p.features || []).map(f => `<li><span>\u2705</span><span>${esc(f)}</span></li>`).join('') || `<li class="muted">\u2014</li>`}
       </ul>
@@ -786,7 +928,8 @@ function renderSubscriptionView() {
 }
 
 /* ---------- TEACHER DASHBOARD ---------- */
-function studentAvg(s) { if (!s.grades || !s.grades.length) return 0; return s.grades.reduce((a, g) => a + g.value, 0) / s.grades.length; }
+function validGradeValues(s) { return (s.grades || []).map(g => num(g.value)).filter(v => v >= 1 && v <= 5); }
+function studentAvg(s) { const v = validGradeValues(s); if (!v.length) return 0; return v.reduce((a, b) => a + b, 0) / v.length; }
 function studentAttendancePercent(studentId) {
   if (!state.attendance.length) return null;
   let total = 0, present = 0;
@@ -817,8 +960,7 @@ function renderTeacherDash() {
   // (bo'sh) ID bilan ishlab, "ruxsat yo'q" xatosini berardi.
   if (activeGroup && state.activeGroupId !== activeGroup.id) {
     state.activeGroupId = activeGroup.id;
-    subscribeStudentsIfNeeded();
-    loadGroupExtrasOnce();
+    syncActiveGroup();
   }
   const status = getSubStatus();
   const limit = getGroupLimit();
@@ -868,10 +1010,10 @@ function renderGroupPanel(group) {
       const att = studentAttendancePercent(s.id);
       return `<tr>
         <td>${i + 1}</td>
-        <td>${s.photo ? `<img class="student-photo" src="${s.photo}">` : '\u2014'}</td>
+        <td>${s.photo ? `<img class="student-photo" src="${safeImgSrc(s.photo)}">` : '\u2014'}</td>
         <td><b>${esc(s.fullName)}</b>${s.fromPhoto ? ` <span class="muted" style="font-size:11px;">${t('fromPhotoTag')}</span>` : ''}</td>
         <td>${esc(s.className || '\u2014')}</td>
-        <td>${(s.grades || []).map(g => `<span class="grade ${gradeClass(g.value)}" title="${esc(g.subject)}${g.period ? ' \u00B7 ' + esc(g.period) : ''}">${g.value}</span>`).join(' ') || '<span class="muted">\u2014</span>'}
+        <td>${(s.grades || []).map(g => `<span class="grade ${gradeClass(num(g.value))}" title="${esc(g.subject)}${g.period ? ' \u00B7 ' + esc(g.period) : ''}">${num(g.value)}</span>`).join(' ') || '<span class="muted">\u2014</span>'}
           <button class="link-btn no-print" data-addgrade="${s.id}" style="margin-left:6px;" ${locked ? 'disabled' : ''}>${t('addGradeLink')}</button></td>
         <td><b>${a ? a.toFixed(2) : '\u2014'}</b></td>
         <td><span style="color:${lvl.c};font-weight:700;">${lvl.label}</span>
@@ -1095,7 +1237,7 @@ function renderModal() {
       ` : `
         ${state.groupDocs.length === 0 ? `<div class="empty" style="margin-top:12px;">${t('docEmpty')}</div>` :
           `<div style="margin-top:12px;">${state.groupDocs.map(d => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);">
-            <div><span class="tag-subject">${cats[d.category] || d.category}</span> <b>${esc(d.title)}</b><br><a href="${d.fileData}" download="${esc(d.fileName)}" class="muted" style="font-size:12px;">\u{1F4CE} ${esc(d.fileName)}</a></div>
+            <div><span class="tag-subject">${esc(cats[d.category] || d.category)}</span> <b>${esc(d.title)}</b><br><a href="${safeFileHref(d.fileData)}" download="${esc(d.fileName)}" class="muted" style="font-size:12px;">\u{1F4CE} ${esc(d.fileName)}</a></div>
             <button class="link-btn" data-deldoc="${d.id}" style="color:var(--danger);">${t('docDelete')}</button>
           </div>`).join('')}</div>`}
         <div class="divider"></div>
@@ -1115,7 +1257,7 @@ function renderModal() {
   if (m.type === 'attendance') {
     const group = state.groups.find(g => g.id === m.groupId);
     const students = state.students.filter(s => s.groupId === m.groupId);
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = localDateStr();
     const existing = state.attendance.find(a => a.date === (m.date || todayStr));
     return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:460px;">
       <h2>${t('attendanceTitle')}</h2>
@@ -1123,7 +1265,7 @@ function renderModal() {
       ${students.length === 0 ? `<div class="empty">${t('emptyStudents')}</div>` :
         `<div style="margin-top:12px;max-height:340px;overflow:auto;">
         ${students.map(s => {
-          const checked = existing?.records ? existing.records[s.id] !== false : true;
+          const checked = (m.draft && Object.prototype.hasOwnProperty.call(m.draft, s.id)) ? !!m.draft[s.id] : (existing?.records ? existing.records[s.id] !== false : true);
           return `<label class="check-row" style="justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:8px;">
             <span>${esc(s.fullName)}</span>
             <input type="checkbox" data-att-student="${s.id}" ${checked ? 'checked' : ''}>
@@ -1148,7 +1290,7 @@ function renderModal() {
         ${ids.length === 0 ? `<div class="muted" style="font-size:12.5px;">${t('coTeacherEmpty')}</div>` :
           ids.map(uid => `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;">
             <span style="font-size:13px;">${esc(info[uid]?.fullName || info[uid]?.email || uid)}</span>
-            <button class="link-btn" data-removecoteacher="${uid}" style="color:var(--danger);font-size:12px;">${t('coTeacherRemove')}</button>
+            <button class="link-btn" data-removecoteacher="${esc(uid)}" style="color:var(--danger);font-size:12px;">${t('coTeacherRemove')}</button>
           </div>`).join('')}
       </div>
       <label>${t('coTeacherEmailLabel')}</label><input type="email" id="coTeacherEmail" placeholder="siz@example.com">
@@ -1188,12 +1330,16 @@ function renderQuarterlyContent(groupId) {
     return `<div class="empty">${t('mQuarterlyEmpty')}</div>`;
   }
   const qLabels = { 1: t('q1'), 2: t('q2'), 3: t('q3'), 4: t('q4') };
+  const ay = academicYearRange();
   let html = `<table><thead><tr><th>${t('colFullName')}</th><th>${qLabels[1]}</th><th>${qLabels[2]}</th><th>${qLabels[3]}</th><th>${qLabels[4]}</th></tr></thead><tbody>`;
   students.forEach(s => {
     const byQ = { 1: [], 2: [], 3: [], 4: [] };
     (s.grades || []).forEach(g => {
+      // Faqat joriy o'quv yilidagi baholar (aks holda o'tgan yil baholari ham aralashib ketardi).
+      if (typeof g.date === 'number' && (g.date < ay.start || g.date >= ay.end)) return;
       const q = quarterOfMonth(g.period);
-      if (q) byQ[q].push(g.value);
+      const v = num(g.value);
+      if (q && v >= 1 && v <= 5) byQ[q].push(v);
     });
     const cell = (arr) => arr.length ? (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(2) : '\u2014';
     html += `<tr><td><b>${esc(s.fullName)}</b></td><td>${cell(byQ[1])}</td><td>${cell(byQ[2])}</td><td>${cell(byQ[3])}</td><td>${cell(byQ[4])}</td></tr>`;
@@ -1334,7 +1480,11 @@ function attachHandlers() {
 
   /* Admin actions */
   document.querySelectorAll('[data-approve]').forEach(el => el.addEventListener('click', async () => {
-    await setTeacherStatus(el.dataset.approve, 'approved'); toast(t('toastApproved'), 'info');
+    try {
+      const tc = state.teachers.find(x => x.id === el.dataset.approve);
+      await setTeacherStatus(el.dataset.approve, 'approved', tc);
+      toast(t('toastApproved'), 'info');
+    } catch (err) { toast(friendlyError(err), 'error'); }
   }));
   document.querySelectorAll('[data-reject]').forEach(el => el.addEventListener('click', () => {
     state.modal = { type: 'rejectReason', teacherId: el.dataset.reject };
@@ -1352,7 +1502,12 @@ function attachHandlers() {
     const title = document.getElementById('notifTitle').value.trim();
     const message = document.getElementById('notifMessage').value.trim();
     if (!title || !message) { toast(t('toastFillTitleMsg'), 'error'); return; }
-    try { await createNotification(title, message); toast(t('toastNotifSent'), 'info'); render(); }
+    try {
+      await createNotification(title, message);
+      document.getElementById('notifTitle').value = '';
+      document.getElementById('notifMessage').value = '';
+      toast(t('toastNotifSent'), 'info');
+    }
     catch (err) { toast(friendlyError(err), 'error'); }
   });
   document.getElementById('saveSubBtn')?.addEventListener('click', async () => {
@@ -1447,11 +1602,14 @@ function attachHandlers() {
     state.modal = { type: 'newGroup' }; render();
   });
   document.querySelectorAll('[data-selectgroup]').forEach(el => el.addEventListener('click', () => {
-    state.activeGroupId = el.dataset.selectgroup; subscribeStudentsIfNeeded(); loadGroupExtrasOnce(); render();
+    state.activeGroupId = el.dataset.selectgroup; syncActiveGroup(); render();
   }));
   document.getElementById('addStudentMenuBtn')?.addEventListener('click', () => { state.modal = { type: 'addStudent', tab: 'manual' }; render(); });
   document.querySelectorAll('[data-addstudenttab]').forEach(el => el.addEventListener('click', () => { state.modal.tab = el.dataset.addstudenttab; render(); }));
-  document.getElementById('docsBtn')?.addEventListener('click', () => { state.modal = { type: 'groupDocs', tab: 'workplan' }; render(); });
+  document.getElementById('docsBtn')?.addEventListener('click', () => {
+    state.modal = { type: 'groupDocs', tab: 'workplan' }; render();
+    loadGroupDocsOnce().then(render).catch(err => toast(friendlyError(err), 'error'));
+  });
   document.querySelectorAll('[data-docstab]').forEach(el => el.addEventListener('click', () => { state.modal.tab = el.dataset.docstab; render(); }));
   document.getElementById('attendanceBtn')?.addEventListener('click', () => { state.modal = { type: 'attendance', groupId: state.activeGroupId }; render(); });
   document.getElementById('reportsMenuBtn')?.addEventListener('click', () => { state.modal = { type: 'reportsMenu' }; render(); });
@@ -1465,6 +1623,7 @@ function attachHandlers() {
   document.getElementById('downloadReportBtn')?.addEventListener('click', () => window.print());
   document.querySelectorAll('[data-addgrade]').forEach(el => el.addEventListener('click', () => { state.modal = { type: 'addGrade', studentId: el.dataset.addgrade }; render(); }));
   document.querySelectorAll('[data-delstudent]').forEach(el => el.addEventListener('click', async () => {
+    if (!confirm(t('confirmDeleteStudent'))) return;
     try { await deleteStudent(el.dataset.delstudent); }
     catch (err) { toast(friendlyError(err), 'error'); }
   }));
@@ -1478,9 +1637,11 @@ function attachHandlers() {
     const name = document.getElementById('ngName').value.trim();
     const subject = document.getElementById('ngSubject').value.trim();
     if (!name || !subject) { toast(t('toastFillAllFields'), 'error'); return; }
-    const gid = await createGroup(state.firebaseUser.uid, name, subject);
-    state.activeGroupId = gid; subscribeStudentsIfNeeded(); loadGroupExtrasOnce();
-    state.modal = null; render();
+    try {
+      const gid = await createGroup(state.firebaseUser.uid, name, subject);
+      state.activeGroupId = gid; syncActiveGroup();
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
   });
 
   document.getElementById('amSave')?.addEventListener('click', async () => {
@@ -1558,6 +1719,17 @@ function attachHandlers() {
     const raw = document.getElementById('bulkNamesArea').value;
     let names = raw.split('\n').map(s => s.trim()).filter(Boolean);
     if (!names.length) { toast(t('toastEnterOneName'), 'error'); return; }
+    // Takroriy ismlarni (ro'yxat ichida va guruhda mavjudlarini) o'tkazib yuboramiz.
+    const seenNames = new Set(state.students.filter(s => s.groupId === state.activeGroupId).map(s => (s.fullName || '').trim().toLowerCase()));
+    const before = names.length;
+    names = names.map(n => n.replace(/\s+/g, ' ').slice(0, 120)).filter(n => {
+      const k = n.toLowerCase();
+      if (seenNames.has(k)) return false;
+      seenNames.add(k);
+      return true;
+    });
+    const skippedDup = before - names.length;
+    if (!names.length) { toast(`${skippedDup} ${t('toastDupSkipped')}`, 'error'); return; }
     const limit = getStudentLimit();
     if (limit) {
       const already = state.students.filter(s => s.groupId === state.activeGroupId).length;
@@ -1567,10 +1739,8 @@ function attachHandlers() {
     }
     const btn = document.getElementById('bulkSave'); btn.disabled = true; btn.textContent = t('toastAdding');
     try {
-      for (const name of names) {
-        await addStudent(state.firebaseUser.uid, state.activeGroupId, { fullName: name, className: cls });
-      }
-      toast(`${names.length} ${t('toastStudentsAdded')}`, 'info');
+      await addStudentsBatch(state.firebaseUser.uid, state.activeGroupId, names, cls);
+      toast(`${names.length} ${t('toastStudentsAdded')}${skippedDup ? ` (${skippedDup} ${t('toastDupSkipped')})` : ''}`, 'info');
       state.modal = null; render();
     } catch (err) {
       toast(friendlyError(err), 'error');
@@ -1665,8 +1835,12 @@ function attachHandlers() {
 
   /* Davomat (yo'qlama) */
   document.getElementById('attDate')?.addEventListener('change', (e) => {
-    state.modal.date = e.target.value; render();
+    state.modal.date = e.target.value; state.modal.draft = {}; render();
   });
+  document.querySelectorAll('[data-att-student]').forEach(el => el.addEventListener('change', () => {
+    state.modal.draft = state.modal.draft || {};
+    state.modal.draft[el.dataset.attStudent] = el.checked;
+  }));
   document.getElementById('attendanceSaveBtn')?.addEventListener('click', async () => {
     const date = document.getElementById('attDate').value;
     const records = {};
@@ -1770,8 +1944,8 @@ async function exportGroupToExcel() {
   });
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, group.name.slice(0, 28) || 'Sheet1');
-  XLSX.writeFile(wb, `${group.name || 'guruh'}.xlsx`);
+  XLSX.utils.book_append_sheet(wb, ws, (group.name || '').replace(/[\[\]:*?\/\\]/g, '_').slice(0, 28) || 'Sheet1');
+  XLSX.writeFile(wb, `${(group.name || 'guruh').replace(/[\\/:*?"<>|]+/g, '_')}.xlsx`);
 }
 
 function startLockCountdownIfNeeded() {
@@ -1786,6 +1960,7 @@ function startLockCountdownIfNeeded() {
 }
 
 render();
+handleRedirectResult().catch(err => toast(friendlyError(err), 'error'));
 
 /* Reklama karuseli: har 6 soniyada avtomatik almashadi. To'liq render() emas,
    faqat karusel DOM elementini yangilaydi — shu bilan boshqa joyda yozilayotgan
