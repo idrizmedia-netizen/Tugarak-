@@ -1618,9 +1618,9 @@ function attachHandlers() {
   document.getElementById('openEditGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'editGroup', groupId: state.activeGroupId }; render(); });
   document.getElementById('openDeleteGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'deleteGroupConfirm', groupId: state.activeGroupId }; render(); });
   document.getElementById('quarterlyBtn')?.addEventListener('click', () => { state.modal = { type: 'quarterly', groupId: state.activeGroupId }; render(); });
-  document.getElementById('printBtn')?.addEventListener('click', () => window.print());
+  document.getElementById('printBtn')?.addEventListener('click', () => printGroupReport());
   document.getElementById('excelExportBtn')?.addEventListener('click', () => exportGroupToExcel());
-  document.getElementById('downloadReportBtn')?.addEventListener('click', () => window.print());
+  document.getElementById('downloadReportBtn')?.addEventListener('click', () => printGroupReport());
   document.querySelectorAll('[data-addgrade]').forEach(el => el.addEventListener('click', () => { state.modal = { type: 'addGrade', studentId: el.dataset.addgrade }; render(); }));
   document.querySelectorAll('[data-delstudent]').forEach(el => el.addEventListener('click', async () => {
     if (!confirm(t('confirmDeleteStudent'))) return;
@@ -1924,6 +1924,110 @@ function attachHandlers() {
   });
 }
 
+
+/* ================= TEKSHIRUVCHI UCHUN HISOBOT (chop etish) =================
+   Avval "Tekshiruvchi uchun eksport" tugmasi oddiy window.print() ni chaqirardi: bosilganda ochiq turgan
+   oyna chop etilib, bo'sh varaq chiqardi. Endi alohida, tayyor hujjat (guruh ma'lumoti, o'quvchilar,
+   choraklik baholar, davomat, ish reja, imzo joylari) yashirin ramkada tuziladi va shuni chop etadi —
+   sahifaning dizayniga (styles.css) bog'liq emas. */
+function quarterAverages(s) {
+  const ay = academicYearRange();
+  const byQ = { 1: [], 2: [], 3: [], 4: [] };
+  (s.grades || []).forEach(g => {
+    if (typeof g.date === 'number' && (g.date < ay.start || g.date >= ay.end)) return;
+    const q = quarterOfMonth(g.period);
+    const v = num(g.value);
+    if (q && v >= 1 && v <= 5) byQ[q].push(v);
+  });
+  return [1, 2, 3, 4].map(q => byQ[q].length ? (byQ[q].reduce((a, b) => a + b, 0) / byQ[q].length).toFixed(2) : '\u2014');
+}
+function formatDateDMY(d) {
+  d = d || new Date();
+  return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`;
+}
+function buildReportHTML(group, students) {
+  const teacherName = state.userDoc?.fullName || '';
+  const plan = (state.workPlan || []).filter(r => r && (r.topic || r.hours || r.date || r.note));
+  const rows = students.map((s, i) => {
+    const a = studentAvg(s);
+    const p = studentAttendancePercent(s.id);
+    const q = quarterAverages(s);
+    return `<tr>
+      <td class="c">${i + 1}</td>
+      <td>${esc(s.fullName)}</td>
+      <td class="c">${esc(s.className || '')}</td>
+      <td class="c">${q[0]}</td><td class="c">${q[1]}</td><td class="c">${q[2]}</td><td class="c">${q[3]}</td>
+      <td class="c"><b>${a ? a.toFixed(2) : '\u2014'}</b></td>
+      <td class="c">${a ? esc(levelLabel(a).label) : '\u2014'}</td>
+      <td class="c">${p === null ? '\u2014' : p + '%'}</td>
+    </tr>`;
+  }).join('');
+  const planRows = plan.map((r, i) => `<tr>
+      <td class="c">${i + 1}</td><td>${esc(r.topic)}</td><td class="c">${esc(r.hours)}</td>
+      <td class="c">${esc(r.date)}</td><td>${esc(r.note)}</td></tr>`).join('');
+  const lang = esc(getLang?.() || 'uz');
+  return `<!doctype html><html lang="${lang}"><head><meta charset="utf-8">
+<title>${esc(t('printReportTitle'))} \u2014 ${esc(group.name)}</title>
+<style>
+  @page { size: A4; margin: 14mm 12mm; }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, "Helvetica Neue", sans-serif; color: #111; font-size: 12px; margin: 0; }
+  h1 { font-size: 18px; text-align: center; margin: 0 0 4px; }
+  .sub { text-align: center; color: #555; margin-bottom: 14px; font-size: 11px; }
+  h2 { font-size: 13px; margin: 18px 0 6px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { border: 1px solid #444; padding: 4px 6px; vertical-align: top; }
+  th { background: #e9e9e9; -webkit-print-color-adjust: exact; print-color-adjust: exact; font-size: 11px; }
+  thead { display: table-header-group; }
+  tr { page-break-inside: avoid; }
+  .c { text-align: center; }
+  .info td { border: none; padding: 2px 0; }
+  .info td:first-child { width: 150px; color: #555; }
+  .sign { display: flex; justify-content: space-between; gap: 30px; margin-top: 34px; }
+  .sign div { flex: 1; border-top: 1px solid #444; padding-top: 4px; font-size: 11px; color: #333; }
+</style></head><body>
+<h1>${esc(t('printReportTitle'))}</h1>
+<div class="sub">TUGARAK+ \u00B7 ${esc(t('printDate'))}: ${formatDateDMY()}</div>
+<table class="info"><tbody>
+  <tr><td>${esc(t('printTeacher'))}:</td><td><b>${esc(teacherName)}</b></td></tr>
+  <tr><td>${esc(t('printGroup'))}:</td><td><b>${esc(group.name)}</b></td></tr>
+  <tr><td>${esc(t('printSubject'))}:</td><td>${esc(group.subject)}</td></tr>
+  <tr><td>${esc(t('printStudentsCount'))}:</td><td>${students.length}</td></tr>
+</tbody></table>
+<h2>${esc(t('mQuarterlyTitle'))}</h2>
+<table><thead><tr>
+  <th>${esc(t('colNum'))}</th><th>${esc(t('colFullName'))}</th><th>${esc(t('colClass'))}</th>
+  <th>${esc(t('q1'))}</th><th>${esc(t('q2'))}</th><th>${esc(t('q3'))}</th><th>${esc(t('q4'))}</th>
+  <th>${esc(t('colAvg'))}</th><th>${esc(t('colLevel'))}</th><th>${esc(t('colAttendance'))}</th>
+</tr></thead><tbody>${rows}</tbody></table>
+${plan.length ? `<h2>${esc(t('printWorkPlanTitle'))}</h2>
+<table><thead><tr><th>${esc(t('colNum'))}</th><th>${esc(t('colTopic'))}</th><th>${esc(t('colHours'))}</th><th>${esc(t('colDate'))}</th><th>${esc(t('colNote'))}</th></tr></thead><tbody>${planRows}</tbody></table>` : ''}
+<div class="sign"><div>${esc(t('printSignTeacher'))}</div><div>${esc(t('printSignInspector'))}</div></div>
+</body></html>`;
+}
+/** HTML hujjatni yashirin ramkada chop etadi (popup bloklanmaydi, sahifa dizayni aralashmaydi). */
+function printHtmlDocument(htmlDoc) {
+  const frame = document.createElement('iframe');
+  frame.setAttribute('aria-hidden', 'true');
+  frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+  let done = false;
+  const cleanup = () => { if (done) return; done = true; setTimeout(() => frame.remove(), 500); };
+  frame.onload = () => {
+    const w = frame.contentWindow;
+    if (!w) { cleanup(); return; }
+    w.addEventListener('afterprint', cleanup);
+    setTimeout(() => { try { w.focus(); w.print(); } catch (e) { console.warn('Chop etish xatosi:', e); cleanup(); } }, 150);
+    setTimeout(cleanup, 120000); // zaxira: afterprint kelmasa ham ramka o'chiriladi
+  };
+  document.body.appendChild(frame);
+  frame.srcdoc = htmlDoc;
+}
+function printGroupReport() {
+  const group = state.groups.find(g => g.id === state.activeGroupId);
+  const students = state.students.filter(s => s.groupId === state.activeGroupId);
+  if (!group || !students.length) { toast(t('printNoStudents'), 'error'); return; }
+  printHtmlDocument(buildReportHTML(group, students));
+}
 
 async function exportGroupToExcel() {
   const group = state.groups.find(g => g.id === state.activeGroupId);
