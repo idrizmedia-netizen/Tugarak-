@@ -2,7 +2,7 @@
 // o'rnatilishini ta'minlaydi va internet vaqtincha uzilganda oldingi
 // yuklangan sahifani ko'rsatishga yordam beradi.
 const CACHE_NAME = 'tugarak-plus-v1';
-const PRECACHE_URLS = ['/', '/index.html', '/manifest.json', '/icon-192.png', '/icon-512.png'];
+const PRECACHE_URLS = ['/', '/index.html', '/manifest.json', '/icon-192.png', '/icon-512.png', '/register-sw.js'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -30,8 +30,11 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        const clone = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone)).catch(() => {});
+        // Faqat muvaffaqiyatli javoblar keshlanadi (404/500 sahifalar keshga tushmasin).
+        if (response.ok) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone)).catch(() => {});
+        }
         return response;
       })
       .catch(() => caches.match(event.request).then((cached) => cached || caches.match('/index.html')))
