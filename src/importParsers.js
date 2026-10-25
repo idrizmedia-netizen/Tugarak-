@@ -58,15 +58,19 @@ function extractNamesFromRows(rows) {
   const names = [];
   for (const row of rows) {
     if (!row || !row.length) continue;
-    // Ism odatda birinchi ustunda bo'ladi; agar bo'sh bo'lsa, keyingi to'ldirilgan katakni sinab ko'ramiz.
+    // Ism odatda birinchi MATNLI katakda bo'ladi. Tartib raqami ustuni ("1", "2." ...) va
+    // sarlavha kataklari (T/r, №, F.I.Sh) o'tkazib yuboriladi, keyingi to'ldirilgan katak olinadi.
     let cell = '';
+    let isHeader = false;
     for (const c of row) {
       const v = String(c ?? '').trim();
-      if (v) { cell = v; break; }
+      if (!v) continue;
+      if (/^(t\/r|№|no\.?|ism|f\.?i\.?sh\.?|fio|ism-familiya)$/i.test(v)) { isHeader = true; break; }
+      if (/^\d+[\.\)]?$/.test(v)) continue; // faqat tartib raqami
+      cell = v;
+      break;
     }
-    if (!cell) continue;
-    if (/^(t\/r|№|no\.?|ism|f\.?i\.?sh\.?|fio|ism-familiya)$/i.test(cell)) continue; // sarlavha qatorini o'tkazib yuborish
-    if (/^\d+$/.test(cell)) continue; // faqat raqamdan iborat qatorlar (masalan tartib raqami ustuni)
+    if (isHeader || !cell) continue;
     names.push(cell.replace(/^\d+[\.\)\-]\s*/, ''));
   }
   return names;
