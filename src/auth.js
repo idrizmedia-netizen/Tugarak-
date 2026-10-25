@@ -1,8 +1,8 @@
 import {
   createUserWithEmailAndPassword, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect,
-  getRedirectResult, signOut, sendPasswordResetEmail, onAuthStateChanged
+  getRedirectResult, signOut, sendPasswordResetEmail, sendEmailVerification, onAuthStateChanged
 } from 'firebase/auth';
-import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, serverTimestamp, onSnapshot } from 'firebase/firestore';
 import { auth, db, googleProvider } from './firebase.js';
 
 const LOCK_AFTER = 3;
@@ -75,6 +75,8 @@ async function doRegister({ fullName, email, phone, password }) {
     try { await cred.user.delete(); } catch (e) { console.warn('Yarim hisobni o\u2019chirib bo\u2019lmadi:', e); }
     throw err;
   }
+  // Email tasdiqlash xati (bloklamaydi: yuborilmasa ham ro'yxatdan o'tish davom etadi).
+  try { await sendEmailVerification(cred.user); } catch (e) { console.warn('Tasdiqlash xati yuborilmadi:', e.code || e); }
   return cred.user;
 }
 export async function registerTeacher(args) {
@@ -172,6 +174,14 @@ export async function isAdmin(uid) {
     console.warn('admins hujjatini o\u2019qib bo\u2019lmadi:', e.code || e);
     return false;
   }
+}
+
+/** O'qituvchi profilini real vaqtda kuzatadi: admin tasdiqlaganda yoki obunani faollashtirganda
+ *  sahifani qayta yuklash shart bo'lmaydi. */
+export function watchUserDoc(uid, callback) {
+  return onSnapshot(doc(db, 'users', uid),
+    snap => callback(snap.exists() ? { id: snap.id, ...snap.data() } : null),
+    err => console.warn('users hujjatini kuzatishda xato:', err.code || err));
 }
 
 export async function getUserDoc(uid) {
