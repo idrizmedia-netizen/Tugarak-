@@ -2,7 +2,7 @@ import './styles.css';
 import {
   watchAuth, registerTeacher, loginTeacher, loginWithGoogle, completeGoogleRegistration,
   resetPassword, logout, isAdmin, getUserDoc, getLockInfo, registerFail, clearFails,
-  waitForRegistration, ensureGoogleUserDoc, isGoogleUser, handleRedirectResult
+  waitForRegistration, ensureGoogleUserDoc, isGoogleUser, handleRedirectResult, watchUserDoc
 } from './auth.js';
 import {
   watchAllTeachers, setTeacherStatus, watchMyGroups, createGroup, updateGroup, deleteGroup,
@@ -14,7 +14,7 @@ import {
   getGroupDocsOnce, addGroupDoc, deleteGroupDoc,
   getAttendanceOnce, saveAttendance,
   findApprovedTeacherByEmail, addCoTeacher, removeCoTeacher,
-  watchAllGroupsAdmin, watchAllStudentsAdmin,
+  getAllGroupsAdminOnce, getAllStudentsAdminOnce,
   getWorkPlanOnce, saveWorkPlanItems,
   addStudentsBatch, syncTeacherDirectory
 } from './db.js';
@@ -33,9 +33,13 @@ function fileToCompressedBase64(file, maxWidth = 480, quality = 0.6) {
       img.onload = () => {
         const scale = Math.min(1, maxWidth / img.width);
         const canvas = document.createElement('canvas');
-        canvas.width = img.width * scale;
-        canvas.height = img.height * scale;
-        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext('2d');
+        // JPEG shaffoflikni bilmaydi: oq fon chizilmasa, shaffof PNG qora bo'lib qoladi.
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         resolve(canvas.toDataURL('image/jpeg', quality));
       };
       img.onerror = reject;
@@ -72,7 +76,8 @@ let state = {
   allStudentsAdmin: [],
 };
 
-let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubAllGroupsAdmin = null, unsubAllStudentsAdmin = null;
+let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubUserDoc = null;
+let adminDataLoadedAt = 0, adminDataLoading = false;
 let syncedGroupId = null, extrasRun = 0, directoryBackfillStarted = false;
 
 /** Foydalanuvchi almashganda/chiqqanda oldingi akkaunt ma'lumotlari xotirada qolib ketmasligi uchun. */
@@ -81,6 +86,24 @@ function resetSessionState() {
   state.teachers = []; state.groups = []; state.students = []; state.activeGroupId = null;
   state.notifications = []; state.ads = []; state.groupDocs = []; state.attendance = []; state.workPlan = [];
   state.allGroupsAdmin = []; state.allStudentsAdmin = []; state.modal = null; state.adDismissed = false;
+}
+
+/** Admin statistikasi uchun guruh va o'quvchilarni BIR MARTA o'qiydi (real-vaqtli tinglovchi o'rniga).
+ *  force=false bo'lsa, oxirgi yuklashdan 5 daqiqa o'tmagan bo'lsa qayta o'qimaydi. */
+async function loadAdminDataOnce(force) {
+  if (adminDataLoading) return;
+  if (!force && Date.now() - adminDataLoadedAt < 5 * 60 * 1000) return;
+  adminDataLoading = true;
+  const run = authRun;
+  try {
+    const [groups, students] = await Promise.all([getAllGroupsAdminOnce(), getAllStudentsAdminOnce()]);
+    if (run !== authRun) return; // foydalanuvchi almashgan
+    state.allGroupsAdmin = groups; state.allStudentsAdmin = students;
+    adminDataLoadedAt = Date.now();
+    render();
+  } catch (err) {
+    console.warn('Admin statistikasini yuklab bo\u2019lmadi:', err.code || err);
+  } finally { adminDataLoading = false; }
 }
 
 /** Admin birinchi marta kirganda tasdiqlangan o'qituvchilarni hamkor-qidiruv katalogiga bir martalik ko'chiradi. */
@@ -188,8 +211,8 @@ watchAuth(async (user) => {
   if (unsubNotifications) { unsubNotifications(); unsubNotifications = null; }
   if (unsubSubscription) { unsubSubscription(); unsubSubscription = null; }
   if (unsubAds) { unsubAds(); unsubAds = null; }
-  if (unsubAllGroupsAdmin) { unsubAllGroupsAdmin(); unsubAllGroupsAdmin = null; }
-  if (unsubAllStudentsAdmin) { unsubAllStudentsAdmin(); unsubAllStudentsAdmin = null; }
+  adminDataLoadedAt = 0;
+  if (unsubUserDoc) { unsubUserDoc(); unsubUserDoc = null; }
   resetSessionState();
 
   if (!user) {
@@ -215,8 +238,7 @@ watchAuth(async (user) => {
     state.role = 'admin';
     state.view = 'adminDash';
     unsubTeachers = watchAllTeachers(list => { state.teachers = list; backfillDirectoryOnce(list); render(); });
-    unsubAllGroupsAdmin = watchAllGroupsAdmin(list => { state.allGroupsAdmin = list; render(); });
-    unsubAllStudentsAdmin = watchAllStudentsAdmin(list => { state.allStudentsAdmin = list; render(); });
+    loadAdminDataOnce(true);
     render();
     return;
   }
@@ -236,7 +258,20 @@ watchAuth(async (user) => {
     await logout();
     return;
   }
+  applyTeacherDoc(user, udoc);
+  // Profil real vaqtda kuzatiladi: holat (status) o'zgarsa interfeys darhol yangilanadi.
+  unsubUserDoc = watchUserDoc(user.uid, d => {
+    if (stale() || !d) return;
+    const prev = state.userDoc;
+    if (prev && prev.status === d.status) { state.userDoc = d; render(); return; }
+    applyTeacherDoc(user, d);
+  });
+});
+
+/** O'qituvchi hujjati (status) bo'yicha mos ekranni va guruh obunasini o'rnatadi. */
+function applyTeacherDoc(user, udoc) {
   state.userDoc = udoc;
+  if (unsubGroups) { unsubGroups(); unsubGroups = null; }
   if (udoc.status === 'incomplete') { state.view = 'googleComplete'; render(); return; }
   if (udoc.status === 'approved') {
     if (state.view !== 'subscription') state.view = 'teacherDash';
@@ -253,7 +288,7 @@ watchAuth(async (user) => {
     state.view = 'teacherPending';
   }
   render();
-});
+}
 
 function subscribeStudentsIfNeeded() {
   if (unsubStudents) { unsubStudents(); unsubStudents = null; }
@@ -1013,7 +1048,7 @@ function renderGroupPanel(group) {
         <td>${s.photo ? `<img class="student-photo" src="${safeImgSrc(s.photo)}">` : '\u2014'}</td>
         <td><b>${esc(s.fullName)}</b>${s.fromPhoto ? ` <span class="muted" style="font-size:11px;">${t('fromPhotoTag')}</span>` : ''}</td>
         <td>${esc(s.className || '\u2014')}</td>
-        <td>${(s.grades || []).map(g => `<span class="grade ${gradeClass(num(g.value))}" title="${esc(g.subject)}${g.period ? ' \u00B7 ' + esc(g.period) : ''}">${num(g.value)}</span>`).join(' ') || '<span class="muted">\u2014</span>'}
+        <td>${(s.grades || []).map(g => `<span class="grade ${gradeClass(num(g.value))}" title="${esc(g.subject)}${g.period ? ' \u00B7 ' + esc(periodLabel(g.period)) : ''}">${num(g.value)}</span>`).join(' ') || '<span class="muted">\u2014</span>'}
           <button class="link-btn no-print" data-addgrade="${s.id}" style="margin-left:6px;" ${locked ? 'disabled' : ''}>${t('addGradeLink')}</button></td>
         <td><b>${a ? a.toFixed(2) : '\u2014'}</b></td>
         <td><span style="color:${lvl.c};font-weight:700;">${lvl.label}</span>
@@ -1308,10 +1343,30 @@ function monthOptionsHTML() {
     en: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'] };
   const arr = names[getLang()] || names.uz;
   const now = new Date().getMonth();
-  return arr.map((name, i) => `<option value="${name}" ${i === now ? 'selected' : ''}>${name}</option>`).join('');
+  // Qiymat til-mustaqil (m0..m11): keyinchalik til almashsa ham chorak to'g'ri aniqlanadi.
+  return arr.map((name, i) => `<option value="m${i}" ${i === now ? 'selected' : ''}>${name}</option>`).join('');
+}
+
+/** Saqlangan davrni (yangi: "m3", eski: "Aprel") joriy tildagi oy nomiga o'giradi. */
+function periodLabel(p) {
+  const m = /^m(\d{1,2})$/.exec(String(p ?? ''));
+  if (!m || Number(m[1]) > 11) return String(p ?? '');
+  const names = { uz: ['Yanvar', 'Fevral', 'Mart', 'Aprel', 'May', 'Iyun', 'Iyul', 'Avgust', 'Sentabr', 'Oktabr', 'Noyabr', 'Dekabr'],
+    ru: ['\u042f\u043d\u0432\u0430\u0440\u044c', '\u0424\u0435\u0432\u0440\u0430\u043b\u044c', '\u041c\u0430\u0440\u0442', '\u0410\u043f\u0440\u0435\u043b\u044c', '\u041c\u0430\u0439', '\u0418\u044e\u043d\u044c', '\u0418\u044e\u043b\u044c', '\u0410\u0432\u0433\u0443\u0441\u0442', '\u0421\u0435\u043d\u0442\u044f\u0431\u0440\u044c', '\u041e\u043a\u0442\u044f\u0431\u0440\u044c', '\u041d\u043e\u044f\u0431\u0440\u044c', '\u0414\u0435\u043a\u0430\u0431\u0440\u044c'],
+    en: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'] };
+  return (names[getLang()] || names.uz)[Number(m[1])];
 }
 
 function quarterOfMonth(monthName) {
+  const mm = /^m(\d{1,2})$/.exec(String(monthName ?? ''));
+  if (mm) {
+    const mi = Number(mm[1]);
+    if (mi > 11) return null;
+    if ([8, 9, 10].includes(mi)) return 1;
+    if ([11, 0, 1].includes(mi)) return 2;
+    if ([2, 3, 4].includes(mi)) return 3;
+    return 4;
+  }
   const idx = { Yanvar: 0, Fevral: 1, Mart: 2, Aprel: 3, May: 4, Iyun: 5, Iyul: 6, Avgust: 7, Sentabr: 8, Oktabr: 9, Noyabr: 10, Dekabr: 11,
     '\u042f\u043d\u0432\u0430\u0440\u044c': 0, '\u0424\u0435\u0432\u0440\u0430\u043b\u044c': 1, '\u041c\u0430\u0440\u0442': 2, '\u0410\u043f\u0440\u0435\u043b\u044c': 3, '\u041c\u0430\u0439': 4, '\u0418\u044e\u043d\u044c': 5, '\u0418\u044e\u043b\u044c': 6, '\u0410\u0432\u0433\u0443\u0441\u0442': 7, '\u0421\u0435\u043d\u0442\u044f\u0431\u0440\u044c': 8, '\u041e\u043a\u0442\u044f\u0431\u0440\u044c': 9, '\u041d\u043e\u044f\u0431\u0440\u044c': 10, '\u0414\u0435\u043a\u0430\u0431\u0440\u044c': 11,
     January: 0, February: 1, March: 2, April: 3, June: 5, July: 6, August: 7, September: 8, October: 9, November: 10, December: 11 };
@@ -1380,7 +1435,10 @@ function attachHandlers() {
     state.modal = { type: 'profile' };
     render();
   });
-  document.querySelectorAll('[data-navto]').forEach(el => el.addEventListener('click', () => { state.view = el.dataset.navto; render(); }));
+  document.querySelectorAll('[data-navto]').forEach(el => el.addEventListener('click', () => {
+    state.view = el.dataset.navto; render();
+    if (state.role === 'admin' && (state.view === 'adminDash' || state.view === 'adminReports')) loadAdminDataOnce(false);
+  }));
   document.querySelectorAll('[data-goto]').forEach(el => el.addEventListener('click', () => { state.view = el.dataset.goto; render(); }));
   document.querySelectorAll('[data-tab]').forEach(el => el.addEventListener('click', () => { state.authTab = el.dataset.tab; render(); }));
 
