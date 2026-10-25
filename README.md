@@ -23,11 +23,11 @@ reklama va bildirishnomalar. Uch tilli interfeys (uz / ru / en), tun/kun rejimi,
 ## Ishga tushirish
 
 1. `.env.example` ni `.env` ga nusxalab, Firebase kalitlarini kiriting (`VITE_FIREBASE_*`).
-2. `npm install` → `npm run dev`.
+2. `npm install` → `npm run dev`. **Birinchi marta o'rnatgandan keyin paydo bo'lgan `package-lock.json` ni ham GitHub'ga yuklang** — shunda Vercel har safar aynan bir xil versiyalarni o'rnatadi.
 3. Vercel'da shu o'zgaruvchilarni **Environment Variables** ga kiriting.
 4. Firebase Console → Authentication → Settings → **Authorized domains** ga Vercel domenini qo'shing.
 
-> `VITE_ADMIN_EMAILS` endi ishlatilmaydi — Vercel'dan o'chiring (admin emaili brauzer kodiga tushmasligi uchun).
+> `VITE_ADMIN_EMAILS` butunlay olib tashlandi — agar Vercel'da qolgan bo'lsa, uni o'chiring.
 
 ## Birinchi administratorni yaratish
 
