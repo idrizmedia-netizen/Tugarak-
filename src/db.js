@@ -345,14 +345,15 @@ export async function saveWorkPlanItems(teacherId, groupId, items) {
   await setDoc(doc(db, 'workPlans', groupId), { teacherId, groupId, items: clean }, { merge: true });
 }
 
-/* ---------- admin: butun tizim bo'yicha hisobotlar uchun to'liq ma'lumot ---------- */
-export function watchAllGroupsAdmin(callback) {
-  return onSnapshot(collection(db, 'groups'), snap => {
-    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-  });
+/* ---------- admin: butun tizim bo'yicha hisobotlar uchun to'liq ma'lumot ----------
+   Avval bu kolleksiyalar doimiy tinglanardi (onSnapshot): har bir o'quvchi/baho o'zgarishi admin
+   brauzeriga qayta yuklanib, Spark rejasidagi o'qish limitini tez tugatardi. Endi bir marta
+   o'qiladi (getDocs); main.js kerak bo'lganda (sahifaga qaytganda, 5 daqiqadan keyin) yangilaydi. */
+export async function getAllGroupsAdminOnce() {
+  const snap = await getDocs(collection(db, 'groups'));
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
-export function watchAllStudentsAdmin(callback) {
-  return onSnapshot(collection(db, 'students'), snap => {
-    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-  });
+export async function getAllStudentsAdminOnce() {
+  const snap = await getDocs(collection(db, 'students'));
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
