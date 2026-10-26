@@ -8,7 +8,7 @@ import {
   watchAllTeachers, setTeacherStatus, watchMyGroups, createGroup, updateGroup, deleteGroup,
   watchGroupStudents, addStudent, deleteStudent, addGrade,
   watchNotifications, createNotification,
-  rejectTeacher, resubmitApplication, updateTeacherProfile,
+  rejectTeacher, resubmitApplication, updateTeacherProfile, blockTeacher, unblockTeacher,
   watchSubscriptionSettings, saveSubscriptionSettings, chooseSubscriptionPlan, markPlanContacted,
   activateSubscription, cancelSubscription, watchAds, addAd, updateAd, deleteAd,
   getGroupDocsOnce, addGroupDoc, deleteGroupDoc,
@@ -75,7 +75,7 @@ let state = {
   workPlan: [],
   allGroupsAdmin: [],
   allStudentsAdmin: [],
-  studentQuery: '', studentSort: 'added',
+  studentQuery: '', studentSort: 'added', teacherQuery: '',
 };
 
 let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubUserDoc = null;
@@ -636,6 +636,11 @@ function renderTeacherPending() {
       <button class="btn btn-teal" id="openResubmitBtn" style="margin-top:16px;">${t('resubmitBtn')}</button>
     </div>`;
   }
+  if (ud?.status === 'blocked') {
+    return `<div class="card"><h2>${t('blockedTitle')}</h2>
+      <div class="error-box">${t('blockedMsg')}</div>
+    </div>`;
+  }
   return `<div class="card"><h2>${t('pendingTitle')}</h2>
     <p class="muted">${t('pendingMsg', { name: esc(ud?.fullName || '') })}</p>
     ${ud?.resubmitReason ? `<div class="info-box" style="margin-top:10px;">\u{1F504} ${esc(ud.resubmitReason)}</div>` : ''}
@@ -659,6 +664,10 @@ function renderAdminDash() {
   const pending = state.teachers.filter(tc => tc.status === 'pending');
   const approved = state.teachers.filter(tc => tc.status === 'approved');
   const rejected = state.teachers.filter(tc => tc.status === 'rejected');
+  const blocked = state.teachers.filter(tc => tc.status === 'blocked');
+  const tq = (state.teacherQuery || '').trim().toLowerCase();
+  const matchTeacher = (tc) => !tq || [tc.fullName, tc.email, tc.phone].some(v => String(v || '').toLowerCase().includes(tq));
+  const approvedShown = approved.filter(matchTeacher);
 
   // Eng faol o'qituvchilar: guruhlar soni bo'yicha reyting
   const groupCountByTeacher = {};
@@ -685,6 +694,7 @@ function renderAdminDash() {
     <div class="stat-card"><div class="num">${pending.length}</div><div class="lbl">${t('statPending')}</div></div>
     <div class="stat-card"><div class="num">${approved.length}</div><div class="lbl">${t('statApproved')}</div></div>
     <div class="stat-card"><div class="num">${rejected.length}</div><div class="lbl">${t('statRejected')}</div></div>
+    ${blocked.length ? `<div class="stat-card"><div class="num">${blocked.length}</div><div class="lbl">${t('statBlocked')}</div></div>` : ''}
   </div>
 
   <div class="card">
@@ -729,12 +739,20 @@ function renderAdminDash() {
       </div>`).join('')}
   </div>
   <div class="card">
-    <h2>${t('approvedTitle')}</h2><div class="divider"></div>
-    ${approved.length === 0 ? `<div class="empty">${t('emptyApproved')}</div>` : `
-    <table><thead><tr><th>${t('colName')}</th><th>${t('colEmail')}</th><th>${t('colPhone')}</th></tr></thead><tbody>
-    ${approved.map(tc => `<tr><td>${esc(tc.fullName)}</td><td>${esc(tc.email)}</td><td>${esc(tc.phone || '')}</td></tr>`).join('')}
-    </tbody></table>`}
+    <h2>${t('approvedTitle')}</h2>
+    ${approved.length || tq ? `<input type="text" id="teacherSearch" placeholder="${t('teacherSearchPh')}" value="${esc(state.teacherQuery)}" style="margin-top:10px;">` : ''}
+    <div class="divider"></div>
+    ${approved.length === 0 ? `<div class="empty">${t('emptyApproved')}</div>` : approvedShown.length === 0 ? `<div class="empty">${t('noSearchResults')}</div>` : `
+    <div style="overflow-x:auto;"><table><thead><tr><th>${t('colName')}</th><th>${t('colEmail')}</th><th>${t('colPhone')}</th><th></th></tr></thead><tbody>
+    ${approvedShown.map(tc => `<tr><td>${esc(tc.fullName)}</td><td>${esc(tc.email)}</td><td>${esc(tc.phone || '')}</td>
+      <td style="white-space:nowrap;"><button class="link-btn" data-block="${tc.id}" style="color:var(--danger);">${t('blockBtn')}</button></td></tr>`).join('')}
+    </tbody></table></div>`}
   </div>
+  ${blocked.length ? `<div class="card"><h2>${t('blockedListTitle')}</h2><div class="divider"></div>
+    ${blocked.map(tc => `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);">
+      <div><b>${esc(tc.fullName)}</b> <span class="pill rejected">${t('blockedPill')}</span><br><span class="muted">${esc(tc.email)} \u00B7 ${esc(tc.phone || '')}</span></div>
+      <button class="btn btn-teal" data-unblock="${tc.id}">${t('unblockBtn')}</button></div>`).join('')}
+  </div>` : ''}
   ${rejected.length ? `<div class="card"><h2>${t('rejectedListTitle')}</h2><div class="divider"></div>
     ${rejected.map(tc => `<div class="muted" style="padding:6px 0;">${esc(tc.fullName)} \u2014 ${esc(tc.email)}${tc.rejectionReason ? `<br><span style="color:var(--danger);font-size:12px;">${t('rejectionReasonShown')} ${esc(tc.rejectionReason)}</span>` : ''}</div>`).join('')}</div>` : ''}
   `;
@@ -797,7 +815,11 @@ function renderAdminReportsView() {
     <table><thead><tr><th>\u2116</th><th>${t('mGroupNameLabel')}</th><th>${t('colName')}</th><th>${t('profileStudents')}</th><th>${t('colAvg')}</th></tr></thead><tbody>
     ${ranked.map((g, i) => `<tr><td>${i + 1}</td><td><b>${esc(g.name)}</b></td><td>${esc(teacherNameByUid[g.teacherId] || '\u2014')}</td><td>${g.studentCount}</td><td><b>${g.avg.toFixed(2)}</b></td></tr>`).join('')}
     </tbody></table>`}
-    <button class="btn btn-primary no-print" id="downloadReportBtn" style="margin-top:18px;">${t('adminDownloadReport')}</button>
+    <div class="no-print" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px;">
+      <button class="btn btn-primary" id="downloadReportBtn">${t('adminDownloadReport')}</button>
+      <button class="btn btn-outline" id="adminExcelBtn">${t('exportExcelBtn')}</button>
+      <button class="btn btn-outline" id="adminRefreshBtn">${t('refreshBtn')}</button>
+    </div>
   </div>`;
 }
 
@@ -1824,6 +1846,25 @@ function attachHandlers() {
       state.modal = null; render();
     } catch (err) { toast(friendlyError(err), 'error'); }
   });
+  document.getElementById('teacherSearch')?.addEventListener('input', (e) => { state.teacherQuery = e.target.value; render(); });
+  document.querySelectorAll('[data-block]').forEach(el => el.addEventListener('click', async () => {
+    const tc = state.teachers.find(x => x.id === el.dataset.block);
+    if (!tc || !confirm(t('confirmBlock', { name: tc.fullName || tc.email }))) return;
+    try { await blockTeacher(tc.id, tc); toast(t('toastBlocked'), 'info'); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+  }));
+  document.querySelectorAll('[data-unblock]').forEach(el => el.addEventListener('click', async () => {
+    const tc = state.teachers.find(x => x.id === el.dataset.unblock);
+    if (!tc || !confirm(t('confirmUnblock', { name: tc.fullName || tc.email }))) return;
+    try { await unblockTeacher(tc.id, tc); toast(t('toastUnblocked'), 'info'); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+  }));
+  document.getElementById('adminExcelBtn')?.addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try { await exportAdminReportToExcel(); } catch (err) { toast(friendlyError(err), 'error'); }
+    e.target.disabled = false;
+  });
+  document.getElementById('adminRefreshBtn')?.addEventListener('click', () => loadAdminDataOnce(true));
   document.getElementById('sendNotifBtn')?.addEventListener('click', async () => {
     const title = document.getElementById('notifTitle').value.trim();
     const message = document.getElementById('notifMessage').value.trim();
@@ -2540,6 +2581,49 @@ function buildAttendanceReport(groupId, month) {
     avgPct: sumAll ? Math.round(sumP / sumAll * 100) : null,
     top: rows.filter(r => r.absent > 0).sort((a, b) => b.absent - a.absent).slice(0, 5)
   };
+}
+/** Admin hisoboti: Umumiy / Guruhlar / O'qituvchilar varaqlari bilan bitta Excel fayl. */
+async function exportAdminReportToExcel() {
+  await loadAdminDataOnce(true); // eng so'nggi ma'lumot bilan
+  const XLSX = await import('xlsx');
+  const groups = state.allGroupsAdmin || [];
+  const students = state.allStudentsAdmin || [];
+  const teachers = state.teachers || [];
+  const avgOf = (list) => { const g = list.filter(s => s.grades?.length); return g.length ? g.reduce((a, s) => a + studentAvg(s), 0) / g.length : null; };
+  const nameByUid = {}; teachers.forEach(tc => { nameByUid[tc.id] = tc.fullName; });
+  const count = (st) => teachers.filter(tc => tc.status === st).length;
+  const r2 = (v) => v === null ? '' : Number(v.toFixed(2));
+
+  const summary = [
+    [t('adminReportsTitle')],
+    [t('reportGeneratedAt'), fmtDMY(localDateStr())],
+    [],
+    [t('reportTotalTeachers'), count('approved')],
+    [t('statPending'), count('pending')],
+    [t('statRejected'), count('rejected')],
+    [t('statBlocked'), count('blocked')],
+    [t('reportTotalGroups'), groups.length],
+    [t('reportTotalStudents'), students.length],
+    [t('reportAvgScore'), r2(avgOf(students))]
+  ];
+  const groupRows = groups.map((g, i) => {
+    const gs = students.filter(s => s.groupId === g.id);
+    return { [t('colNum')]: i + 1, [t('mGroupNameLabel')]: g.name, [t('mSubjectShortLabel')]: g.subject || '',
+      [t('colName')]: nameByUid[g.teacherId] || '', [t('profileStudents')]: gs.length, [t('colAvg')]: r2(avgOf(gs)) };
+  });
+  const statusLbl = { approved: t('statApproved'), pending: t('statPending'), rejected: t('statRejected'), blocked: t('statBlocked') };
+  const teacherRows = teachers.map((tc, i) => {
+    const gids = groups.filter(g => g.teacherId === tc.id).map(g => g.id);
+    return { [t('colNum')]: i + 1, [t('colName')]: tc.fullName || '', [t('colEmail')]: tc.email || '', [t('colPhone')]: tc.phone || '',
+      [t('colStatusLbl')]: statusLbl[tc.status] || '',
+      [t('colGroupsN')]: gids.length, [t('colStudentsN')]: students.filter(s => gids.includes(s.groupId)).length,
+      [t('colRegistered')]: tc.createdAt?.toMillis ? fmtDMY(ymdOf(new Date(tc.createdAt.toMillis()))) : '' };
+  });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), t('xlsSheetSummary').slice(0, 30));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(groupRows), t('xlsSheetGroups').slice(0, 30));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(teacherRows), t('xlsSheetTeachers').slice(0, 30));
+  XLSX.writeFile(wb, `Tugarak_hisobot_${localDateStr()}.xlsx`);
 }
 async function exportAttendanceToExcel(groupId, month) {
   const group = state.groups.find(g => g.id === groupId);
