@@ -20,7 +20,7 @@ import {
   updateStudent, setStudentGrades, updateGroupPaySettings, updateStudentPayment, applyPayDeadlines
 } from './db.js';
 import { auth } from './firebase.js';
-import { parseRosterFile } from './importParsers.js';
+import { parseRosterFile, parseWorkPlanFile } from './importParsers.js';
 import { t, LANGS, getLang, setLang, contractText } from './i18n.js';
 
 /** Rasmni kichraytirib, siqilgan base64 (JPEG) shaklga o'giradi.
@@ -428,8 +428,18 @@ function getSubStatus() {
   if (!expiresAtMs) return { plan, state: 'active' };
   // Muddat tugashi bilan darhol bepul reja cheklovlariga qaytariladi
   // (imtiyoz muddati berilmaydi).
-  if (Date.now() <= expiresAtMs) return { plan, state: 'active', expiresAtMs };
+  if (Date.now() <= expiresAtMs) return { plan, state: 'active', expiresAtMs, daysLeft: daysBetween(localDateStr(), ymdOf(new Date(expiresAtMs))) };
   return { plan, state: 'expired', expiresAtMs };
+}
+function ymdOf(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
+const SUB_WARN_DAYS = 7;
+/** Pullik obuna tugashiga 7 kun va undan kam qolganda ogohlantirish. */
+function subExpiringBannerHTML(status) {
+  if (status.plan === 'free' || status.state !== 'active' || !status.expiresAtMs) return '';
+  if (status.daysLeft === null || status.daysLeft > SUB_WARN_DAYS) return '';
+  const date = fmtDMY(ymdOf(new Date(status.expiresAtMs)));
+  const msg = status.daysLeft <= 0 ? t('subExpiringToday', { date }) : t('subExpiringBanner', { n: status.daysLeft, date });
+  return `<div class="no-print" style="margin-bottom:16px;padding:10px 12px;border-radius:8px;font-size:13px;background:#C9992C15;border:1px solid #C9992C55;color:var(--gold);">${msg} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>`;
 }
 function getGroupLimit() {
   const status = getSubStatus();
@@ -1114,6 +1124,7 @@ function renderTeacherDash() {
   const limit = getGroupLimit();
   return `
   ${status.state === 'expired' ? `<div class="error-box no-print" style="margin-bottom:16px;">${t('subExpiredBanner', { limit })} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>` : ''}
+  ${subExpiringBannerHTML(status)}
   <div class="card no-print">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div><h2 style="margin:0;">${t('groupsTitle')}</h2><div class="muted">${t('groupsDesc')}</div></div>
@@ -1361,6 +1372,7 @@ function renderModal() {
       <h2>${t('reportsMenuBtn')}</h2>
       <div style="display:flex;flex-direction:column;gap:10px;margin-top:14px;">
         <button class="btn btn-outline block" id="quarterlyBtn">${t('quarterlyBtn')}</button>
+        <button class="btn btn-outline block" data-openattreport>${t('attReportBtn')}</button>
         <button class="btn btn-outline block" id="excelExportBtn">${t('exportExcelBtn')}</button>
         <button class="btn btn-primary block" id="printBtn">${t('exportPrintBtn')}</button>
       </div>
@@ -1491,6 +1503,11 @@ function renderModal() {
           <div><label>${t('workPlanNoteLabel')}</label><input type="text" id="wpNote"></div>
         </div>
         <button class="btn btn-teal block" id="workPlanAddBtn" style="margin-top:12px;">${t('workPlanAddRow')}</button>
+        <div class="divider"></div>
+        <div class="upload-drop" id="wpImportZone">
+          <input type="file" id="wpImportInput" accept=".csv,.xlsx,.xls" style="display:none;">${t('wpImportBtn')}
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:6px;">${t('wpImportHint')}</div>
       ` : `
         ${state.groupDocs.length === 0 ? `<div class="empty" style="margin-top:12px;">${t('docEmpty')}</div>` :
           `<div style="margin-top:12px;">${state.groupDocs.map(d => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);">
@@ -1532,7 +1549,29 @@ function renderModal() {
       <div style="display:flex;gap:10px;margin-top:18px;">
         <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
         <button class="btn btn-teal block" id="attendanceSaveBtn">${t('attendanceSave')}</button>
-      </div></div></div>`;
+      </div>
+      <button class="link-btn" data-openattreport style="margin-top:12px;">${t('attReportBtn')}</button></div></div>`;
+  }
+  if (m.type === 'attendanceReport') {
+    const rep = buildAttendanceReport(m.groupId, m.month);
+    const mn = (ym) => { const [y, mo] = ym.split('-'); return `${(MONTHS_FULL[getLang()] || MONTHS_FULL.uz)[Number(mo) - 1]} ${y}`; };
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:820px;">
+      <h2>${t('attReportTitle')}</h2>
+      ${rep.months.length === 0 ? `<div class="empty">${t('attNoData')}</div>` : `
+      <label>${t('attMonthLabel')}</label>
+      <select id="attMonth" style="max-width:240px;">${rep.months.map(ym => `<option value="${ym}" ${ym === rep.month ? 'selected' : ''}>${mn(ym)}</option>`).join('')}</select>
+      <div class="muted" style="margin-top:10px;">${t('attLessons', { n: rep.lessons.length })}${rep.avgPct === null ? '' : ` &nbsp;\u00B7&nbsp; <b>${t('attAvgLabel', { p: rep.avgPct })}</b>`}</div>
+      ${rep.top.length ? `<div class="info-box" style="margin-top:10px;"><b>${t('attTopAbsent')}:</b> ${rep.top.map(r => `${esc(r.s.fullName)} (${t('attTimes', { n: r.absent })})`).join(', ')}</div>` : ''}
+      <div style="overflow-x:auto;margin-top:12px;">
+      <table><thead><tr><th>${t('colNum')}</th><th>${t('colFullName')}</th>${rep.lessons.map(l => `<th style="text-align:center;">${esc(l.date.slice(8, 10))}</th>`).join('')}<th>${t('attColPresent')}</th><th>${t('attColAbsent')}</th><th>%</th></tr></thead><tbody>
+      ${rep.rows.map((r, i) => `<tr><td>${i + 1}</td><td><b>${esc(r.s.fullName)}</b></td>
+        ${r.marks.map(mk => mk === null ? '<td style="text-align:center;" class="muted">\u00B7</td>' : mk ? '<td style="text-align:center;color:var(--teal);font-weight:700;">\u2713</td>' : '<td style="text-align:center;color:var(--danger);font-weight:700;">\u2717</td>').join('')}
+        <td>${r.present}</td><td>${r.absent}</td>
+        <td style="${r.pct !== null && r.pct < 70 ? 'color:var(--danger);' : ''}font-weight:700;">${r.pct === null ? '\u2014' : r.pct + '%'}</td></tr>`).join('')}
+      </tbody></table></div>
+      <button class="btn btn-outline block" id="attExportBtn" style="margin-top:14px;">${t('exportExcelBtn')}</button>`}
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:12px;">${t('mClose')}</button>
+    </div></div>`;
   }
   if (m.type === 'coTeachers') {
     const group = state.groups.find(g => g.id === m.groupId);
@@ -1904,6 +1943,11 @@ function attachHandlers() {
   document.getElementById('openCoTeacherBtn')?.addEventListener('click', () => { state.modal = { type: 'coTeachers', groupId: state.activeGroupId }; render(); });
   document.getElementById('openEditGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'editGroup', groupId: state.activeGroupId }; render(); });
   document.getElementById('openDeleteGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'deleteGroupConfirm', groupId: state.activeGroupId }; render(); });
+  document.querySelectorAll('[data-openattreport]').forEach(el => el.addEventListener('click', () => {
+    state.modal = { type: 'attendanceReport', groupId: state.activeGroupId, month: '' }; render();
+  }));
+  document.getElementById('attMonth')?.addEventListener('change', (e) => { state.modal.month = e.target.value; render(); });
+  document.getElementById('attExportBtn')?.addEventListener('click', () => exportAttendanceToExcel(state.modal.groupId, state.modal.month));
   document.getElementById('quarterlyBtn')?.addEventListener('click', () => { state.modal = { type: 'quarterly', groupId: state.activeGroupId }; render(); });
   document.getElementById('printBtn')?.addEventListener('click', () => printGroupReport());
   document.getElementById('excelExportBtn')?.addEventListener('click', () => exportGroupToExcel());
@@ -2112,6 +2156,27 @@ function attachHandlers() {
       document.getElementById('wpDate').value = '';
       document.getElementById('wpNote').value = '';
     } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+  document.getElementById('wpImportZone')?.addEventListener('click', () => document.getElementById('wpImportInput').click());
+  document.getElementById('wpImportInput')?.addEventListener('change', async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const zone = document.getElementById('wpImportZone');
+    zone.textContent = t('toastFileReading');
+    try {
+      const items = await parseWorkPlanFile(file);
+      if (!items.length) { toast(t('wpImportNone'), 'error'); render(); return; }
+      const room = Math.max(0, 300 - state.workPlan.length);
+      const add = items.slice(0, room);
+      if (!add.length) { toast(t('wpImportLimit'), 'error'); render(); return; }
+      const merged = [...state.workPlan, ...add];
+      await saveWorkPlanItems(state.firebaseUser.uid, state.activeGroupId, merged);
+      state.workPlan = merged;
+      toast(t('wpImportDone', { n: add.length }) + (add.length < items.length ? ' ' + t('wpImportLimit') : ''), 'info');
+      render();
+    } catch (err) {
+      toast(t('toastFileReadError') + ' ' + (err.message || ''), 'error');
+      render();
+    }
   });
   document.querySelectorAll('[data-delworkplanrow]').forEach(el => el.addEventListener('click', async () => {
     const idx = parseInt(el.dataset.delworkplanrow);
@@ -2447,6 +2512,46 @@ function printGroupReport() {
   const students = state.students.filter(s => s.groupId === state.activeGroupId);
   if (!group || !students.length) { toast(t('printNoStudents'), 'error'); return; }
   printHtmlDocument(buildReportHTML(group, students));
+}
+
+/** Tanlangan oy uchun davomat jadvali: darslar, har o'quvchi belgilari, foizlar, eng ko'p qoldirganlar. */
+function buildAttendanceReport(groupId, month) {
+  const students = state.students.filter(s => s.groupId === groupId);
+  const dated = state.attendance.filter(a => typeof a.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(a.date));
+  const months = [...new Set(dated.map(a => a.date.slice(0, 7)))].sort().reverse();
+  const cur = months.includes(month) ? month : (months[0] || '');
+  const lessons = dated.filter(a => a.date.startsWith(cur)).sort((a, b) => a.date.localeCompare(b.date));
+  const has = (rec, id) => !!rec && Object.prototype.hasOwnProperty.call(rec, id);
+  const rows = students.map(s => {
+    let present = 0, absent = 0;
+    const marks = lessons.map(l => {
+      if (!has(l.records, s.id)) return null;
+      const p = !!l.records[s.id];
+      if (p) present++; else absent++;
+      return p;
+    });
+    const total = present + absent;
+    return { s, marks, present, absent, pct: total ? Math.round(present / total * 100) : null };
+  }).sort((a, b) => (a.s.fullName || '').localeCompare(b.s.fullName || '', 'uz'));
+  const sumP = rows.reduce((a, r) => a + r.present, 0);
+  const sumAll = rows.reduce((a, r) => a + r.present + r.absent, 0);
+  return {
+    months, month: cur, lessons, rows,
+    avgPct: sumAll ? Math.round(sumP / sumAll * 100) : null,
+    top: rows.filter(r => r.absent > 0).sort((a, b) => b.absent - a.absent).slice(0, 5)
+  };
+}
+async function exportAttendanceToExcel(groupId, month) {
+  const group = state.groups.find(g => g.id === groupId);
+  const rep = buildAttendanceReport(groupId, month);
+  if (!group || !rep.lessons.length) { toast(t('attNoData'), 'error'); return; }
+  const XLSX = await import('xlsx');
+  const head = [t('colNum'), t('colFullName'), ...rep.lessons.map(l => `${l.date.slice(8, 10)}.${l.date.slice(5, 7)}`), t('attColPresent'), t('attColAbsent'), '%'];
+  const body = rep.rows.map((r, i) => [i + 1, r.s.fullName, ...r.marks.map(m => m === null ? '' : m ? '+' : '-'), r.present, r.absent, r.pct === null ? '' : `${r.pct}%`]);
+  const ws = XLSX.utils.aoa_to_sheet([head, ...body]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, rep.month);
+  XLSX.writeFile(wb, `${(group.name || 'guruh').replace(/[\\/:*?"<>|]+/g, '_')}_davomat_${rep.month}.xlsx`);
 }
 
 async function exportGroupToExcel() {
