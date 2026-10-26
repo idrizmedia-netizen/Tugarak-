@@ -18,7 +18,7 @@ import {
   getAllGroupsAdminOnce, getAllStudentsAdminOnce,
   getWorkPlanOnce, saveWorkPlanItems,
   addStudentsBatch, syncTeacherDirectory,
-  updateStudent, setStudentGrades, updateGroupPaySettings, updateStudentPayment, applyPayDeadlines
+  updateStudent, setStudentGrades, updateGroupPaySettings, updateStudentPayment, applyPayDeadlines, startNewAcademicYear
 } from './db.js';
 import { auth } from './firebase.js';
 import { parseRosterFile, parseWorkPlanFile } from './importParsers.js';
@@ -1012,6 +1012,14 @@ function renderSubscriptionView() {
 }
 
 /* ---------- TEACHER DASHBOARD ---------- */
+/** Arxivga yoziladigan o'quv yili nomi: eng oxirgi baho sanasiga qarab ("2025-2026"). Sentabrdan yangi yil boshlanadi. */
+function defaultYearLabel(students) {
+  let maxDate = 0;
+  students.forEach(s => (s.grades || []).forEach(g => { const d = num(g.date); if (d > maxDate) maxDate = d; }));
+  const d = maxDate ? new Date(maxDate) : new Date();
+  const y = d.getFullYear();
+  return d.getMonth() >= 8 ? `${y}-${y + 1}` : `${y - 1}-${y}`;
+}
 /** Bahoni (sana + fan + qiymat bo'yicha) topadi: ro'yxat tartibi o'zgarsa ham to'g'ri bahoga tegadi. */
 function findGrade(s, ref) {
   if (!ref) return null;
@@ -1021,8 +1029,11 @@ function validGradeValues(s) { return (s.grades || []).map(g => num(g.value)).fi
 function studentAvg(s) { const v = validGradeValues(s); if (!v.length) return 0; return v.reduce((a, b) => a + b, 0) / v.length; }
 function studentAttendancePercent(studentId) {
   if (!state.attendance.length) return null;
+  // Yangi o'quv yili boshlangan bo'lsa, foiz faqat shu sanadan keyingi darslardan hisoblanadi.
+  const from = state.groups.find(g => g.id === state.activeGroupId)?.yearStart || '';
   let total = 0, present = 0;
   state.attendance.forEach(a => {
+    if (from && String(a.date || '') < from) return;
     if (a.records && Object.prototype.hasOwnProperty.call(a.records, studentId)) {
       total++;
       if (a.records[studentId]) present++;
@@ -1240,7 +1251,8 @@ function renderGroupPanel(group) {
         <td><b>${esc(s.fullName)}</b>${s.fromPhoto ? ` <span class="muted" style="font-size:11px;">${t('fromPhotoTag')}</span>` : ''}</td>
         <td>${esc(s.className || '\u2014')}</td>
         <td>${(s.grades || []).map((g, gi) => `<span class="grade ${gradeClass(num(g.value))}" ${locked ? '' : `data-editgrade="${s.id}:${gi}" role="button" tabindex="0" style="cursor:pointer;"`} title="${esc(g.subject)}${g.period ? ' \u00B7 ' + esc(periodLabel(g.period)) : ''}">${num(g.value)}</span>`).join(' ') || '<span class="muted">\u2014</span>'}
-          <button class="link-btn no-print" data-addgrade="${s.id}" style="margin-left:6px;" ${locked ? 'disabled' : ''}>${t('addGradeLink')}</button></td>
+          <button class="link-btn no-print" data-addgrade="${s.id}" style="margin-left:6px;" ${locked ? 'disabled' : ''}>${t('addGradeLink')}</button>
+          ${Array.isArray(s.archive) && s.archive.length ? `<button class="link-btn no-print" data-archive="${s.id}" style="margin-left:6px;">\u{1F4DA} ${t('archiveLink')}</button>` : ''}</td>
         <td><b>${a ? a.toFixed(2) : '\u2014'}</b></td>
         <td><span style="color:${lvl.c};font-weight:700;">${lvl.label}</span>
           <div class="progress-bar" style="margin-top:4px;"><div style="width:${Math.min(100, a / 5 * 100)}%;"></div></div></td>
@@ -1265,6 +1277,41 @@ function renderGroupPanel(group) {
 function renderModal() {
   if (!state.modal) return '';
   const m = state.modal;
+  if (m.type === 'newYear') {
+    const students = state.students.filter(x => x.groupId === m.groupId);
+    const withG = students.filter(x => (x.grades || []).length);
+    const total = withG.reduce((a, x) => a + x.grades.length, 0);
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:460px;">
+      <h2>${t('newYearTitle')}</h2>
+      <div class="muted">${t('newYearDesc')}</div>
+      <div class="info-box">${t('newYearStats', { s: withG.length, g: total })}</div>
+      <label>${t('newYearLabelLabel')}</label><input type="text" id="nyLabel" maxlength="20" value="${esc(defaultYearLabel(students))}">
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-danger block" id="nyStart">${t('newYearStart')}</button>
+      </div></div></div>`;
+  }
+  if (m.type === 'studentArchive') {
+    const st = state.students.find(x => x.id === m.studentId);
+    if (!st) return '';
+    const list = (Array.isArray(st.archive) ? st.archive : []).slice().reverse();
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:520px;">
+      <h2>${t('archiveTitle', { name: esc(st.fullName) })}</h2>
+      ${list.length === 0 ? `<div class="empty">${t('archiveEmpty')}</div>` : list.map(a => {
+        const gs = Array.isArray(a.grades) ? a.grades : [];
+        const vals = gs.map(g => num(g.value)).filter(v => v >= 1 && v <= 5);
+        const avg = vals.length ? (vals.reduce((x, y) => x + y, 0) / vals.length).toFixed(2) : '\u2014';
+        return `<div style="padding:12px 0;border-bottom:1px solid var(--line);">
+          <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <b>${esc(a.year || '')}</b>
+            <span class="muted">${t('archiveGradesCount', { n: gs.length })} \u00B7 ${t('archiveAvg')}: <b>${avg}</b></span>
+          </div>
+          <div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;">${gs.map(g => `<span class="grade ${gradeClass(num(g.value))}" title="${esc(g.subject)}${g.period ? ' \u00B7 ' + esc(periodLabel(g.period)) : ''}">${num(g.value)}</span>`).join('') || '<span class="muted">\u2014</span>'}</div>
+        </div>`;
+      }).join('')}
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:16px;">${t('mClose')}</button>
+    </div></div>`;
+  }
   if (m.type === 'editStudent') {
     const s = state.students.find(x => x.id === m.studentId);
     if (!s) return '';
@@ -1423,6 +1470,7 @@ function renderModal() {
       <div style="display:flex;flex-direction:column;gap:10px;margin-top:14px;">
         <button class="btn btn-outline block" id="openCoTeacherBtn">${t('coTeacherBtn')}</button>
         <button class="btn btn-outline block" id="openEditGroupBtn">${t('editGroupBtn')}</button>
+        <button class="btn btn-outline block" id="openNewYearBtn">${t('newYearBtn')}</button>
         <button class="btn btn-danger block" id="openDeleteGroupBtn">${t('deleteGroupBtn')}</button>
       </div>
       <button class="btn btn-outline block" id="modalCancel" style="margin-top:16px;">${t('mClose')}</button>
@@ -2015,6 +2063,22 @@ function attachHandlers() {
   document.getElementById('reportsMenuBtn')?.addEventListener('click', () => { state.modal = { type: 'reportsMenu' }; render(); });
   document.getElementById('groupSettingsBtn')?.addEventListener('click', () => { state.modal = { type: 'groupSettings' }; render(); });
   document.getElementById('openCoTeacherBtn')?.addEventListener('click', () => { state.modal = { type: 'coTeachers', groupId: state.activeGroupId }; render(); });
+  document.getElementById('openNewYearBtn')?.addEventListener('click', () => { state.modal = { type: 'newYear', groupId: state.activeGroupId }; render(); });
+  document.getElementById('nyStart')?.addEventListener('click', async () => {
+    const label = document.getElementById('nyLabel').value.trim();
+    if (!label) { toast(t('newYearNoLabel'), 'error'); return; }
+    if (!confirm(t('newYearConfirm'))) return;
+    const gid = state.modal.groupId;
+    const btn = document.getElementById('nyStart'); btn.disabled = true;
+    try {
+      await startNewAcademicYear(gid, state.students.filter(x => x.groupId === gid), label, localDateStr());
+      toast(t('newYearDone'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); btn.disabled = false; }
+  });
+  document.querySelectorAll('[data-archive]').forEach(el => el.addEventListener('click', () => {
+    state.modal = { type: 'studentArchive', studentId: el.dataset.archive }; render();
+  }));
   document.getElementById('openEditGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'editGroup', groupId: state.activeGroupId }; render(); });
   document.getElementById('openDeleteGroupBtn')?.addEventListener('click', () => { state.modal = { type: 'deleteGroupConfirm', groupId: state.activeGroupId }; render(); });
   document.querySelectorAll('[data-openattreport]').forEach(el => el.addEventListener('click', () => {
