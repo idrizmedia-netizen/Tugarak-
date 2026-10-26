@@ -157,6 +157,13 @@ export async function removeCoTeacher(groupId, teacherUid) {
   });
 }
 
+/** Guruhda to'lov kuni belgilangan bo'lsa, yangi o'quvchiga boshlang'ich muddatni beradi. */
+function payFields(payDue, payDay) {
+  const d = Number(payDay);
+  if (!DATE_RE.test(payDue || '') || !Number.isInteger(d) || d < 1 || d > 31) return {};
+  return { payDue, payDay: d };
+}
+
 /* ---------- students ---------- */
 export function watchGroupStudents(groupId, callback) {
   const q = query(collection(db, 'students'), where('groupId', '==', groupId));
@@ -168,7 +175,7 @@ export function watchGroupStudents(groupId, callback) {
 // to'g'ridan-to'g'ri Firestore hujjatiga saqlanadi (Spark/bepul reja bilan
 // mos ishlashi uchun). Bitta hujjat 1MB dan oshmasligi kerak, shuning uchun
 // rasm src/main.js'da yuklashdan oldin kichraytiriladi va siqiladi.
-export async function addStudent(teacherId, groupId, { fullName, className, photo, fromPhoto, birthDate, address }) {
+export async function addStudent(teacherId, groupId, { fullName, className, photo, fromPhoto, birthDate, address, payDue, payDay }) {
   const name = clip(fullName, 120);
   if (!name) throw invalid('student');
   if (photo && (!isImageData(photo) || photo.length > 250000)) throw invalid('photo');
@@ -176,12 +183,12 @@ export async function addStudent(teacherId, groupId, { fullName, className, phot
     teacherId, groupId, fullName: name, className: clip(className, 40),
     photo: photo || null, fromPhoto: !!fromPhoto,
     birthDate: DATE_RE.test(birthDate || '') ? birthDate : '', address: clip(address, 200),
-    grades: [], createdAt: serverTimestamp()
+    grades: [], createdAt: serverTimestamp(), ...payFields(payDue, payDay)
   });
   return ref.id;
 }
 /** Ko'p o'quvchini bir yo'la (writeBatch) qo'shadi — bittadan await qilishdan ancha tez va arzon. */
-export async function addStudentsBatch(teacherId, groupId, names, className) {
+export async function addStudentsBatch(teacherId, groupId, names, className, pay) {
   const list = names.map(n => clip(n, 120)).filter(Boolean);
   for (let i = 0; i < list.length; i += 400) {
     const batch = writeBatch(db);
@@ -189,13 +196,75 @@ export async function addStudentsBatch(teacherId, groupId, names, className) {
       batch.set(doc(collection(db, 'students')), {
         teacherId, groupId, fullName, className: clip(className, 40),
         photo: null, fromPhoto: false, birthDate: '', address: '',
-        grades: [], createdAt: serverTimestamp()
+        grades: [], createdAt: serverTimestamp(), ...payFields(pay?.payDue, pay?.payDay)
       });
     });
     await batch.commit();
   }
   return list.length;
 }
+export async function updateStudent(studentId, { fullName, className, birthDate, address }) {
+  const name = clip(fullName, 120);
+  if (!name) throw invalid('student');
+  await updateDoc(doc(db, 'students', studentId), {
+    fullName: name, className: clip(className, 40),
+    birthDate: DATE_RE.test(birthDate || '') ? birthDate : '', address: clip(address, 200)
+  });
+}
+/** Baholar ro'yxatini to'liq almashtiradi (bahoni tahrirlash/o'chirish uchun). */
+export async function setStudentGrades(studentId, grades) {
+  const clean = (grades || []).slice(0, 300).map(g => {
+    const v = Number(g.value);
+    const sub = clip(g.subject, 60);
+    if (!Number.isInteger(v) || v < 1 || v > 5 || !sub) throw invalid('grade');
+    const date = Number(g.date);
+    return { subject: sub, value: v, date: Number.isFinite(date) ? date : Date.now(), period: g.period ? clip(g.period, 20) : null };
+  });
+  await updateDoc(doc(db, 'students', studentId), { grades: clean });
+}
+
+/* ---------- to'lov (oylik to'lov muddati) ---------- */
+export async function updateGroupPaySettings(groupId, { fee, payDay }) {
+  const f = Math.max(0, Math.min(100000000, Math.round(Number(fee) || 0)));
+  const d = Number(payDay);
+  await updateDoc(doc(db, 'groups', groupId), {
+    fee: f,
+    payDay: (Number.isInteger(d) && d >= 1 && d <= 31) ? d : deleteField()
+  });
+}
+export async function updateStudentPayment(studentId, p) {
+  const data = {};
+  const dateOk = (v) => v === '' || DATE_RE.test(v || '');
+  if ('payDue' in p) { if (!dateOk(p.payDue)) throw invalid('date'); data.payDue = p.payDue; }
+  if ('paidThrough' in p) { if (!dateOk(p.paidThrough)) throw invalid('date'); data.paidThrough = p.paidThrough; }
+  if ('payDay' in p) {
+    const d = Number(p.payDay);
+    if (!Number.isInteger(d) || d < 1 || d > 31) throw invalid('day');
+    data.payDay = d;
+  }
+  if ('payHistory' in p) {
+    data.payHistory = (p.payHistory || []).slice(-24).map(h => ({
+      at: Number(h.at) || Date.now(),
+      due: DATE_RE.test(h.due || '') ? h.due : '',
+      amount: Math.max(0, Math.round(Number(h.amount) || 0)),
+      prev: DATE_RE.test(h.prev || '') ? h.prev : ''
+    }));
+  }
+  await updateDoc(doc(db, 'students', studentId), data);
+}
+/** Bir nechta o'quvchiga to'lov muddatini bir yo'la belgilaydi: items = [{ id, payDue, payDay }]. */
+export async function applyPayDeadlines(items) {
+  for (let i = 0; i < items.length; i += 400) {
+    const batch = writeBatch(db);
+    items.slice(i, i + 400).forEach(it => {
+      const d = Number(it.payDay);
+      if (!DATE_RE.test(it.payDue || '') || !Number.isInteger(d) || d < 1 || d > 31) throw invalid('pay');
+      batch.update(doc(db, 'students', it.id), { payDue: it.payDue, payDay: d });
+    });
+    await batch.commit();
+  }
+}
+
 export async function deleteStudent(studentId) {
   await deleteDoc(doc(db, 'students', studentId));
 }
