@@ -45,11 +45,31 @@ reklama va bildirishnomalar. Uch tilli interfeys (uz / ru / en), tun/kun rejimi,
   kirganda bir martalik avtomatik ko'chiriladi).
 - Interfeysga qo'yiladigan har qanday Firestore qiymati tozalanadi (rasm/havola/fayl/baho) — XSS himoyasi.
 - Brauzerdagi "3 xato → 30 soniya blok" faqat qo'shimcha himoya. Haqiqiy himoya Firebase Auth'ning
-  `too-many-requests` cheklovi; kuchliroq himoya uchun Firebase **App Check** (reCAPTCHA) ni yoqing.
+  `too-many-requests` cheklovi; kuchliroq himoya uchun Firebase **App Check** (reCAPTCHA) ni yoqing
+  (pastdagi "App Check yoqish" bo'limi).
+- Email/parol bilan ro'yxatdan o'tganlarga tasdiqlash xati yuboriladi. Tasdiqlanmagan o'qituvchiga sariq eslatma
+  chiqadi, admin ariza ro'yxatida esa email holati ("tasdiqlangan" / "tasdiqlanmagan") ko'rinadi. Holat
+  `users/{uid}.emailVerified` ga yoziladi va qoidalar uni Firebase tokenidagi haqiqiy qiymat bilan solishtiradi.
+- Admin o'qituvchini **bloklashi** mumkin (status `blocked`): yozish va o'qish huquqi yopiladi, ma'lumotlar saqlanadi.
 - Firebase kalitini Google Cloud Console → Credentials'da faqat o'z domeningizga (HTTP referrer) cheklang.
 - `vercel.json` dagi CSP hozir **Report-Only** rejimida. Saytni ochib, F12 → Console'da CSP xatosi
   yo'qligiga ishonch hosil qilgach, `Content-Security-Policy-Report-Only` kalitini `Content-Security-Policy`
   ga o'zgartiring.
+
+## App Check yoqish (reCAPTCHA v3)
+
+Tartibga qat'iy rioya qiling: avval kalit va deploy, **oxirida** Enforce. Aks holda hamma foydalanuvchi bloklanib qoladi.
+
+1. https://www.google.com/recaptcha/admin → **Create** → turi **reCAPTCHA v3** → domenlar: Vercel domeningiz
+   (masalan `tugarak.vercel.app`) va `localhost`. Ikkita kalit beriladi: **site key** va **secret key**.
+2. Firebase Console → **App Check** → **Apps** → veb-ilovangiz → **reCAPTCHA** → **secret key**'ni kiriting → Save.
+3. **Site key**'ni Vercel → Settings → Environment Variables'ga `VITE_RECAPTCHA_SITE_KEY` nomi bilan qo'shing
+   va loyihani qayta deploy qiling.
+4. Saytni oching, bir-ikki kun ishlatib, App Check → **Requests** (Metrics) bo'limida so'rovlarning
+   "verified" ekanini ko'ring.
+5. Hammasi to'g'ri bo'lsa: App Check → **APIs** → **Cloud Firestore** → **Enforce** (kerak bo'lsa Authentication ham).
+6. Mahalliy ishlab chiqish (`npm run dev`): brauzer konsoliga "App Check debug token" chiqadi. Uni Console →
+   App Check → ilovangiz → **Manage debug tokens** ga qo'shing.
 
 ## Ma'lum cheklovlar
 
