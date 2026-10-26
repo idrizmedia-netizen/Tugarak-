@@ -77,4 +77,8 @@ Tartibga qat'iy rioya qiling: avval kalit va deploy, **oxirida** Enforce. Aks ho
   uchun Cloud Functions (Blaze reja) kerak.
 - Rasm va hujjatlar Firestore hujjatida base64 ko'rinishida saqlanadi (Storage ishlatilmaydi). Hujjat hajmi
   1 MB bilan cheklangan; rasmlar 480px gacha siqiladi, fayllar 500 KB gacha.
-- Baholar o'quv yillari bo'yicha ajratilmaydi (faqat choraklik hisobot joriy o'quv yilini oladi).
+- **Yangi o'quv yili:** guruh egasi "Guruh sozlamalari → Yangi o'quv yilini boshlash" orqali joriy baholarni
+  o'quvchilarning arxiviga (yil nomi bilan, eng ko'pi 10 yil) ko'chiradi va baholarni tozalaydi. O'quvchilar,
+  to'lovlar, hujjatlar, ish reja va davomat yozuvlari saqlanadi; davomat foizi yangi yil boshlangan sanadan
+  hisoblanadi (eski davomatni "Davomat hisoboti"da oy bo'yicha ko'rish mumkin). Amalni qaytarib bo'lmaydi.
+- Arxiv faqat o'quvchi kartasidagi "Arxiv" oynasida ko'rinadi; eksport va hisobotlar joriy yilni oladi.
