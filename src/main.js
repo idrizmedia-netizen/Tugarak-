@@ -2,7 +2,8 @@ import './styles.css';
 import {
   watchAuth, registerTeacher, loginTeacher, loginWithGoogle, completeGoogleRegistration,
   resetPassword, logout, isAdmin, getUserDoc, getLockInfo, registerFail, clearFails,
-  waitForRegistration, ensureGoogleUserDoc, isGoogleUser, handleRedirectResult, watchUserDoc
+  waitForRegistration, ensureGoogleUserDoc, isGoogleUser, handleRedirectResult, watchUserDoc,
+  resendVerificationEmail, refreshEmailVerified, syncEmailVerifiedFlag
 } from './auth.js';
 import {
   watchAllTeachers, setTeacherStatus, watchMyGroups, createGroup, updateGroup, deleteGroup,
@@ -261,6 +262,7 @@ watchAuth(async (user) => {
     return;
   }
   applyTeacherDoc(user, udoc);
+  syncEmailVerifiedFlag(user, udoc).catch(() => {}); // admin ariza ko'rganda email holati ko'rinadi
   // Profil real vaqtda kuzatiladi: holat (status) o'zgarsa interfeys darhol yangilanadi.
   unsubUserDoc = watchUserDoc(user.uid, d => {
     if (stale() || !d) return;
@@ -432,6 +434,17 @@ function getSubStatus() {
   return { plan, state: 'expired', expiresAtMs };
 }
 function ymdOf(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
+/** Email/parol bilan ro'yxatdan o'tgan va emailini hali tasdiqlamagan o'qituvchiga eslatma. */
+function emailVerifyBannerHTML() {
+  const u = state.firebaseUser;
+  if (!u || state.role !== 'teacher' || u.emailVerified) return '';
+  return `<div class="no-print" style="margin-bottom:16px;padding:10px 12px;border-radius:8px;font-size:13px;background:#C9992C15;border:1px solid #C9992C55;color:var(--gold);">
+    \u2709 ${t('verifyBanner', { email: esc(u.email || '') })}
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-outline" id="resendVerifyBtn">${t('verifyResend')}</button>
+      <button class="btn btn-teal" id="checkVerifyBtn">${t('verifyCheck')}</button>
+    </div></div>`;
+}
 const SUB_WARN_DAYS = 7;
 /** Pullik obuna tugashiga 7 kun va undan kam qolganda ogohlantirish. */
 function subExpiringBannerHTML(status) {
@@ -629,19 +642,20 @@ function renderGoogleCompleteScreen() {
 /* ---------- TEACHER PENDING ---------- */
 function renderTeacherPending() {
   const ud = state.userDoc;
+  const vb = emailVerifyBannerHTML();
   if (ud?.status === 'rejected') {
-    return `<div class="card"><h2>${t('rejectedTitle')}</h2>
+    return `${vb}<div class="card"><h2>${t('rejectedTitle')}</h2>
       <div class="error-box">${t('rejectedMsg')}</div>
       ${ud.rejectionReason ? `<div class="error-box" style="margin-top:10px;"><b>${t('rejectionReasonShown')}</b> ${esc(ud.rejectionReason)}</div>` : ''}
       <button class="btn btn-teal" id="openResubmitBtn" style="margin-top:16px;">${t('resubmitBtn')}</button>
     </div>`;
   }
   if (ud?.status === 'blocked') {
-    return `<div class="card"><h2>${t('blockedTitle')}</h2>
+    return `${vb}<div class="card"><h2>${t('blockedTitle')}</h2>
       <div class="error-box">${t('blockedMsg')}</div>
     </div>`;
   }
-  return `<div class="card"><h2>${t('pendingTitle')}</h2>
+  return `${vb}<div class="card"><h2>${t('pendingTitle')}</h2>
     <p class="muted">${t('pendingMsg', { name: esc(ud?.fullName || '') })}</p>
     ${ud?.resubmitReason ? `<div class="info-box" style="margin-top:10px;">\u{1F504} ${esc(ud.resubmitReason)}</div>` : ''}
     <div class="pill pending">${t('pendingPill')}</div></div>`;
@@ -729,6 +743,7 @@ function renderAdminDash() {
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;padding:12px 0;border-bottom:1px solid var(--line);">
         <div><b>${esc(tc.fullName)}</b> <span class="pill pending">${t('pendingPill')}</span><br>
         <span class="muted">${esc(tc.email)} \u00B7 ${esc(tc.phone || '')} \u00B7 ${tc.contractAccepted ? t('contractOk') : t('contractNo')}</span>
+        ${tc.emailVerified === true ? `<br><span class="pill approved" style="margin-top:4px;">\u2709 ${t('verifiedPill')}</span>` : tc.emailVerified === false ? `<br><span class="pill rejected" style="margin-top:4px;">\u2709 ${t('unverifiedPill')}</span>` : ''}
         ${tc.resubmitReason ? `<div class="info-box" style="margin-top:6px;font-size:12px;">\u{1F504} ${esc(tc.resubmitReason)}</div>` : ''}
         ${tc.proofDocs?.length ? `<div style="margin-top:6px;">${tc.proofDocs.map(p => `<img src="${safeImgSrc(p)}" style="width:50px;height:50px;object-fit:cover;border-radius:6px;border:1px solid var(--line);margin-right:4px;">`).join('')}</div>` : ''}
         </div>
@@ -1146,6 +1161,7 @@ function renderTeacherDash() {
   const limit = getGroupLimit();
   return `
   ${status.state === 'expired' ? `<div class="error-box no-print" style="margin-bottom:16px;">${t('subExpiredBanner', { limit })} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>` : ''}
+  ${emailVerifyBannerHTML()}
   ${subExpiringBannerHTML(status)}
   <div class="card no-print">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
@@ -1830,6 +1846,7 @@ function attachHandlers() {
   document.querySelectorAll('[data-approve]').forEach(el => el.addEventListener('click', async () => {
     try {
       const tc = state.teachers.find(x => x.id === el.dataset.approve);
+      if (tc && tc.emailVerified === false && !confirm(t('confirmApproveUnverified', { name: tc.fullName || tc.email }))) return;
       await setTeacherStatus(el.dataset.approve, 'approved', tc);
       toast(t('toastApproved'), 'info');
     } catch (err) { toast(friendlyError(err), 'error'); }
@@ -1844,6 +1861,22 @@ function attachHandlers() {
       await rejectTeacher(state.modal.teacherId, reason);
       toast(t('toastRejected'), 'info');
       state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+  document.getElementById('resendVerifyBtn')?.addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try { await resendVerificationEmail(); toast(t('verifySent'), 'info'); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+    e.target.disabled = false;
+  });
+  document.getElementById('checkVerifyBtn')?.addEventListener('click', async () => {
+    try {
+      const ok = await refreshEmailVerified();
+      if (ok) {
+        await syncEmailVerifiedFlag(state.firebaseUser, state.userDoc).catch(() => {});
+        toast(t('verifyDone'), 'info');
+      } else toast(t('verifyNot'), 'error');
+      render();
     } catch (err) { toast(friendlyError(err), 'error'); }
   });
   document.getElementById('teacherSearch')?.addEventListener('input', (e) => { state.teacherQuery = e.target.value; render(); });
