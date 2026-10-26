@@ -229,16 +229,40 @@ export async function updateStudent(studentId, { fullName, className, birthDate,
     birthDate: DATE_RE.test(birthDate || '') ? birthDate : '', address: clip(address, 200)
   });
 }
-/** Baholar ro'yxatini to'liq almashtiradi (bahoni tahrirlash/o'chirish uchun). */
-export async function setStudentGrades(studentId, grades) {
-  const clean = (grades || []).slice(0, 300).map(g => {
+/** Baholar ro'yxatini tekshirib, tozalangan nusxasini qaytaradi (eng ko'pi 300 ta). */
+function sanitizeGrades(grades) {
+  return (grades || []).slice(0, 300).map(g => {
     const v = Number(g.value);
     const sub = clip(g.subject, 60);
     if (!Number.isInteger(v) || v < 1 || v > 5 || !sub) throw invalid('grade');
     const date = Number(g.date);
     return { subject: sub, value: v, date: Number.isFinite(date) ? date : Date.now(), period: g.period ? clip(g.period, 20) : null };
   });
-  await updateDoc(doc(db, 'students', studentId), { grades: clean });
+}
+/** Baholar ro'yxatini to'liq almashtiradi (bahoni tahrirlash/o'chirish uchun). */
+export async function setStudentGrades(studentId, grades) {
+  await updateDoc(doc(db, 'students', studentId), { grades: sanitizeGrades(grades) });
+}
+
+/** Yangi o'quv yilini boshlaydi: har bir o'quvchining joriy baholari "arxiv"ga (yil nomi bilan) ko'chadi va
+ *  baholar tozalanadi; guruhga yearStart (bugungi sana) yoziladi — davomat foizi shu sanadan hisoblanadi.
+ *  O'quvchilar, to'lovlar, hujjatlar, ish reja va davomat yozuvlari saqlanadi.
+ *  Qayta ishga tushirilsa xavfsiz: baholari bo'sh o'quvchilar arxivga qayta yozilmaydi. */
+export async function startNewAcademicYear(groupId, students, yearLabel, todayStr) {
+  const label = clip(yearLabel, 20);
+  if (!label || !DATE_RE.test(todayStr || '')) throw invalid('year');
+  const list = students.filter(s => s.groupId === groupId);
+  for (let i = 0; i < list.length; i += 100) {
+    const batch = writeBatch(db);
+    list.slice(i, i + 100).forEach(s => {
+      const grades = Array.isArray(s.grades) ? s.grades : [];
+      if (!grades.length) return;
+      const archive = [...(Array.isArray(s.archive) ? s.archive : []), { year: label, archivedAt: Date.now(), grades: sanitizeGrades(grades) }].slice(-10);
+      batch.update(doc(db, 'students', s.id), { archive, grades: [] });
+    });
+    await batch.commit();
+  }
+  await updateDoc(doc(db, 'groups', groupId), { yearStart: todayStr });
 }
 
 /* ---------- to'lov (oylik to'lov muddati) ---------- */
