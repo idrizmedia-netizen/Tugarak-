@@ -159,6 +159,28 @@ export async function logout() {
   await signOut(auth);
 }
 
+/** Tasdiqlash xatini qayta yuboradi (Firebase tez-tez so'rovlarni o'zi cheklaydi: auth/too-many-requests). */
+export async function resendVerificationEmail() {
+  const u = auth.currentUser;
+  if (!u) throw Object.assign(new Error('no user'), { code: 'app/invalid' });
+  await sendEmailVerification(u);
+}
+/** Foydalanuvchini serverdan qayta o'qiydi va ID tokenni yangilaydi (qoidalar token'dagi email_verified bilan solishtiradi). */
+export async function refreshEmailVerified() {
+  const u = auth.currentUser;
+  if (!u) return false;
+  await u.reload();
+  await u.getIdToken(true);
+  return !!u.emailVerified;
+}
+/** users/{uid}.emailVerified ni haqiqiy holatga keltiradi — admin ariza ko'rayotganda shuni ko'radi.
+ *  Qoidalar bu maydon token'dagi email_verified ga TENG bo'lishini tekshiradi, shuning uchun soxtalashtirib bo'lmaydi. */
+export async function syncEmailVerifiedFlag(user, udoc) {
+  if (!user || !udoc) return;
+  if (udoc.emailVerified === !!user.emailVerified) return;
+  await updateDoc(doc(db, 'users', user.uid), { emailVerified: !!user.emailVerified });
+}
+
 export function watchAuth(callback) {
   return onAuthStateChanged(auth, callback);
 }
