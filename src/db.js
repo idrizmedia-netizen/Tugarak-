@@ -68,6 +68,24 @@ export async function setTeacherStatus(uid, status, teacher) {
   }
   await batch.commit();
 }
+/** Tasdiqlangan o'qituvchini bloklaydi: yozish huquqi yo'qoladi (qoidalar faqat 'approved' ga ruxsat beradi),
+ *  hamkor sifatida qo'shish ro'yxatidan ham olib tashlanadi. Ma'lumotlari o'chmaydi. */
+export async function blockTeacher(uid, teacher) {
+  const batch = writeBatch(db);
+  batch.update(doc(db, 'users', uid), { status: 'blocked', blockedAt: serverTimestamp(), decidedAt: serverTimestamp() });
+  if (teacher?.email) batch.delete(doc(db, 'teacherDirectory', directoryKey(teacher.email)));
+  await batch.commit();
+}
+export async function unblockTeacher(uid, teacher) {
+  const batch = writeBatch(db);
+  batch.update(doc(db, 'users', uid), { status: 'approved', blockedAt: deleteField(), decidedAt: serverTimestamp() });
+  if (teacher?.email) {
+    batch.set(doc(db, 'teacherDirectory', directoryKey(teacher.email)), {
+      uid, fullName: clip(teacher.fullName, 100), email: String(teacher.email).trim().toLowerCase()
+    });
+  }
+  await batch.commit();
+}
 export async function rejectTeacher(uid, reason) {
   await updateDoc(doc(db, 'users', uid), { status: 'rejected', rejectionReason: clip(reason, 500), decidedAt: serverTimestamp() });
 }
