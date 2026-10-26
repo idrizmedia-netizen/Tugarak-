@@ -16,7 +16,8 @@ import {
   findApprovedTeacherByEmail, addCoTeacher, removeCoTeacher,
   getAllGroupsAdminOnce, getAllStudentsAdminOnce,
   getWorkPlanOnce, saveWorkPlanItems,
-  addStudentsBatch, syncTeacherDirectory
+  addStudentsBatch, syncTeacherDirectory,
+  updateStudent, setStudentGrades, updateGroupPaySettings, updateStudentPayment, applyPayDeadlines
 } from './db.js';
 import { auth } from './firebase.js';
 import { parseRosterFile } from './importParsers.js';
@@ -74,6 +75,7 @@ let state = {
   workPlan: [],
   allGroupsAdmin: [],
   allStudentsAdmin: [],
+  studentQuery: '', studentSort: 'added',
 };
 
 let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubUserDoc = null;
@@ -963,6 +965,11 @@ function renderSubscriptionView() {
 }
 
 /* ---------- TEACHER DASHBOARD ---------- */
+/** Bahoni (sana + fan + qiymat bo'yicha) topadi: ro'yxat tartibi o'zgarsa ham to'g'ri bahoga tegadi. */
+function findGrade(s, ref) {
+  if (!ref) return null;
+  return (s.grades || []).find(g => g.date === ref.date && g.subject === ref.subject && num(g.value) === ref.value) || null;
+}
 function validGradeValues(s) { return (s.grades || []).map(g => num(g.value)).filter(v => v >= 1 && v <= 5); }
 function studentAvg(s) { const v = validGradeValues(s); if (!v.length) return 0; return v.reduce((a, b) => a + b, 0) / v.length; }
 function studentAttendancePercent(studentId) {
@@ -984,6 +991,112 @@ function levelLabel(avg) {
   if (avg >= 3.5) return { label: t('levelGood'), c: '#2E6FA8' };
   if (avg >= 3) return { label: t('levelSatisfactory'), c: 'var(--gold)' };
   return { label: t('levelUnsatisfactory'), c: 'var(--danger)' };
+}
+
+/* ---------- TO'LOV (oylik to'lov muddati) ----------
+   O'quvchida: payDue — keyingi to'lov muddati, payDay — har oyning to'lov kuni, paidThrough — oxirgi
+   to'langan muddat, payHistory — to'lovlar tarixi. "To'ladi" bosilganda paidThrough = payDue bo'ladi
+   va payDue bir oyga suriladi. Shu tufayli holat har doim sanadan hisoblanadi (qo'shimcha yangilash kerak emas). */
+const PAY_WARN_DAYS = 3;
+const pad2 = (n) => String(n).padStart(2, '0');
+function parseYMD(str) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(str || ''));
+  return m ? { y: +m[1], m: +m[2], d: +m[3] } : null;
+}
+function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
+function daysBetween(fromStr, toStr) {
+  const a = parseYMD(fromStr), b = parseYMD(toStr);
+  if (!a || !b) return null;
+  return Math.round((Date.UTC(b.y, b.m - 1, b.d) - Date.UTC(a.y, a.m - 1, a.d)) / 86400000);
+}
+/** Sanani bir oyga suradi, oyning kuni (day) saqlanadi (qisqa oyda oxirgi kunga tushadi). */
+function addMonthKeepDay(dateStr, day) {
+  const p = parseYMD(dateStr);
+  if (!p) return '';
+  let y = p.y, m = p.m + 1;
+  if (m > 12) { m = 1; y++; }
+  return `${y}-${pad2(m)}-${pad2(Math.min(day || p.d, daysInMonth(y, m)))}`;
+}
+/** Bugundan boshlab eng yaqin to'lov kuni (bugun ham hisoblanadi). */
+function nextDueFromDay(payDay, todayStr) {
+  const t0 = parseYMD(todayStr || localDateStr());
+  const cand = Math.min(payDay, daysInMonth(t0.y, t0.m));
+  if (cand >= t0.d) return `${t0.y}-${pad2(t0.m)}-${pad2(cand)}`;
+  return addMonthKeepDay(`${t0.y}-${pad2(t0.m)}-${pad2(t0.d)}`, payDay);
+}
+function validPayDay(v) { const n = Number(v); return Number.isInteger(n) && n >= 1 && n <= 31 ? n : null; }
+function fmtDMY(str) { const p = parseYMD(str); return p ? `${pad2(p.d)}.${pad2(p.m)}.${p.y}` : ''; }
+function fmtMoney(n) { return Number(n || 0).toLocaleString('ru-RU'); }
+
+function payStatus(s) {
+  if (!parseYMD(s.payDue)) return { kind: 'none' };
+  const today = localDateStr();
+  if (parseYMD(s.paidThrough) && s.paidThrough >= today) return { kind: 'paid', until: s.paidThrough };
+  const days = daysBetween(today, s.payDue);
+  if (days < 0) return { kind: 'overdue', days: -days };
+  if (days <= PAY_WARN_DAYS) return { kind: 'soon', days };
+  return { kind: 'ok', days };
+}
+function payText(st) {
+  if (st.kind === 'paid') return t('payStatusPaid', { date: fmtDMY(st.until) });
+  if (st.kind === 'overdue') return t('payStatusOverdue', { n: st.days });
+  if (st.kind === 'soon') return st.days === 0 ? t('payStatusToday') : t('payDaysLeft', { n: st.days });
+  if (st.kind === 'ok') return t('payDaysLeft', { n: st.days });
+  return t('payStatusNone');
+}
+function payStyle(kind) {
+  if (kind === 'paid') return 'background:var(--teal);color:#fff;';
+  if (kind === 'overdue') return 'background:var(--danger);color:#fff;';
+  if (kind === 'soon') return 'background:var(--gold);color:#fff;';
+  if (kind === 'ok') return 'background:var(--paper-2);color:var(--ink);';
+  return 'background:transparent;color:var(--ink-soft);border:1px dashed var(--line);';
+}
+function monthCollected(students) {
+  const now = new Date();
+  let sum = 0;
+  students.forEach(s => (Array.isArray(s.payHistory) ? s.payHistory : []).forEach(h => {
+    const at = num(h.at);
+    if (!at) return;
+    const d = new Date(at);
+    if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()) sum += num(h.amount);
+  }));
+  return sum;
+}
+/** Faol guruhda to'lov kuni belgilangan bo'lsa, yangi o'quvchilar uchun boshlang'ich muddat. */
+function groupPayDefaults() {
+  const g = state.groups.find(x => x.id === state.activeGroupId);
+  const day = validPayDay(g?.payDay);
+  return day ? { payDay: day, payDue: nextDueFromDay(day) } : {};
+}
+async function markStudentPaid(s, amount) {
+  if (!parseYMD(s.payDue)) { toast(t('payNoDue'), 'error'); return false; }
+  const day = validPayDay(s.payDay) || parseYMD(s.payDue).d;
+  const hist = Array.isArray(s.payHistory) ? s.payHistory : [];
+  const entry = { at: Date.now(), due: s.payDue, amount: Math.max(0, Math.round(num(amount))), prev: s.paidThrough || '' };
+  await updateStudentPayment(s.id, {
+    paidThrough: s.payDue, payDue: addMonthKeepDay(s.payDue, day), payDay: day,
+    payHistory: [...hist, entry].slice(-24)
+  });
+  toast(t('payMarked'), 'info');
+  return true;
+}
+
+/** Qidiruv va saralash. Standart tartib — qo'shilgan vaqti bo'yicha. */
+function visibleStudents(students) {
+  const q = (state.studentQuery || '').trim().toLowerCase();
+  let list = q ? students.filter(s => (s.fullName || '').toLowerCase().includes(q) || (s.className || '').toLowerCase().includes(q)) : [...students];
+  const created = (s) => s.createdAt?.toMillis ? s.createdAt.toMillis() : Infinity; // hali yozilayotgani oxirida
+  const byName = (a, b) => (a.fullName || '').localeCompare(b.fullName || '', 'uz');
+  const graded = (s) => (s.grades && validGradeValues(s).length) ? studentAvg(s) : null;
+  const sort = state.studentSort;
+  if (sort === 'nameAsc') list.sort(byName);
+  else if (sort === 'avgDesc') list.sort((a, b) => (graded(b) ?? -1) - (graded(a) ?? -1) || byName(a, b));
+  else if (sort === 'avgAsc') list.sort((a, b) => (graded(a) ?? 99) - (graded(b) ?? 99) || byName(a, b));
+  else if (sort === 'pay') {
+    const rank = { overdue: 0, soon: 1, ok: 2, none: 3, paid: 4 };
+    list.sort((a, b) => rank[payStatus(a).kind] - rank[payStatus(b).kind] || byName(a, b));
+  } else list.sort((a, b) => created(a) - created(b));
+  return list;
 }
 
 function renderTeacherDash() {
@@ -1014,50 +1127,85 @@ function renderTeacherDash() {
   `;
 }
 
+function renderPayBanner(students) {
+  if (!students.some(s => parseYMD(s.payDue))) return '';
+  const rows = students.map(s => ({ s, st: payStatus(s) }));
+  const overdue = rows.filter(x => x.st.kind === 'overdue').sort((a, b) => b.st.days - a.st.days);
+  const soon = rows.filter(x => x.st.kind === 'soon').sort((a, b) => a.st.days - b.st.days);
+  const paidCount = rows.filter(x => x.st.kind === 'paid').length;
+  const total = monthCollected(students);
+  const names = (arr, label) => arr.slice(0, 8).map(x => `${esc(x.s.fullName)} (${label(x.st)})`).join(', ') + (arr.length > 8 ? ` +${arr.length - 8}` : '');
+  return `<div class="info-box no-print" style="margin-top:14px;">
+    <b>${t('payBannerTitle')}</b>
+    ${overdue.length ? `<div style="color:var(--danger);margin-top:6px;">\u26A0 <b>${t('payBannerOverdue', { n: overdue.length })}:</b> ${names(overdue, st => `${st.days} ${t('payDayShort')}`)}</div>` : ''}
+    ${soon.length ? `<div style="margin-top:6px;color:var(--gold);">\u23F0 <b>${t('payBannerSoon', { days: PAY_WARN_DAYS, n: soon.length })}:</b> ${names(soon, st => st.days === 0 ? t('payStatusToday') : `${st.days} ${t('payDayShort')}`)}</div>` : ''}
+    <div class="muted" style="margin-top:6px;">${t('payBannerPaid', { n: paidCount })}${total ? ` \u00B7 ${t('payMonthTotal', { sum: fmtMoney(total) })}` : ''}</div>
+  </div>`;
+}
+
 function renderGroupPanel(group) {
   const locked = isGroupLocked(group);
   const students = state.students.filter(s => s.groupId === group.id);
+  const shown = visibleStudents(students);
   const withGrades = students.filter(s => s.grades && s.grades.length);
   const avg = withGrades.length ? withGrades.reduce((a, s) => a + studentAvg(s), 0) / withGrades.length : 0;
   const isOwner = group.teacherId === state.firebaseUser?.uid;
+  const sortOpt = (v, key) => `<option value="${v}" ${state.studentSort === v ? 'selected' : ''}>${t(key)}</option>`;
   return `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div><h2 style="margin:0;">${esc(group.name)}</h2><span class="tag-subject">${esc(group.subject)}</span></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;" class="no-print">
         <button class="btn btn-teal" id="addStudentMenuBtn" ${locked ? 'disabled' : ''}>${t('addStudentMenuBtn')}</button>
         <button class="btn btn-outline" id="attendanceBtn" ${locked ? 'disabled' : ''}>${t('attendanceBtn')}</button>
+        <button class="btn btn-outline" id="payBtn" ${locked ? 'disabled' : ''}>${t('payBtn')}</button>
         <button class="btn btn-outline" id="docsBtn">${t('docsBtn')}</button>
         <button class="btn btn-outline" id="reportsMenuBtn">${t('reportsMenuBtn')}</button>
         ${isOwner ? `<button class="btn btn-outline" id="groupSettingsBtn">${t('groupSettingsBtn')}</button>` : ''}
       </div>
     </div>
     ${locked ? `<div class="error-box" style="margin-top:12px;"><b>${t('groupLockedTitle')}</b><br>${t('groupLockedMsg')} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>` : ''}
+    ${renderPayBanner(students)}
     <div class="divider"></div>
     ${students.length === 0 ? `<div class="empty"><div class="big-icon">\u{1F9D2}</div>${t('emptyStudents')}</div>` : `
+    <div class="no-print" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+      <input type="text" id="studentSearch" placeholder="${t('searchPh')}" value="${esc(state.studentQuery)}" style="flex:1;min-width:180px;">
+      <select id="studentSort" style="flex:0 1 260px;">
+        ${sortOpt('added', 'sortAdded')}${sortOpt('nameAsc', 'sortNameAsc')}${sortOpt('avgDesc', 'sortAvgDesc')}${sortOpt('avgAsc', 'sortAvgAsc')}${sortOpt('pay', 'sortPay')}
+      </select>
+    </div>
     <div style="display:none;" class="jurnal-header" id="jurnalHeader">
       <h2 style="text-align:center;margin:0 0 4px;">TO'GARAK JURNALI</h2>
       <p style="text-align:center;margin:0 0 4px;">"${esc(group.name)}" to'garagi \u2014 ${esc(group.subject)}</p>
       <p style="text-align:center;margin:0 0 16px;">Rahbar: ${esc(state.userDoc?.fullName || '')} &nbsp;\u00B7&nbsp; ${new Date().getFullYear()}-${new Date().getFullYear() + 1} o'quv yili</p>
     </div>
-    <table><thead><tr><th>${t('colNum')}</th><th>${t('colPhoto')}</th><th>${t('colFullName')}</th><th>${t('colClass')}</th><th>${t('colGrades')}</th><th>${t('colAvg')}</th><th>${t('colLevel')}</th><th>${t('colAttendance')}</th><th class="no-print"></th></tr></thead><tbody>
-    ${students.map((s, i) => {
+    ${shown.length === 0 ? `<div class="empty">${t('noSearchResults')}</div>` : `
+    <div style="overflow-x:auto;">
+    <table><thead><tr><th>${t('colNum')}</th><th>${t('colPhoto')}</th><th>${t('colFullName')}</th><th>${t('colClass')}</th><th>${t('colGrades')}</th><th>${t('colAvg')}</th><th>${t('colLevel')}</th><th>${t('colAttendance')}</th><th>${t('payColLabel')}</th><th class="no-print"></th></tr></thead><tbody>
+    ${shown.map((s, i) => {
       const a = studentAvg(s); const lvl = levelLabel(a);
       const att = studentAttendancePercent(s.id);
+      const ps = payStatus(s);
       return `<tr>
         <td>${i + 1}</td>
         <td>${s.photo ? `<img class="student-photo" src="${safeImgSrc(s.photo)}">` : '\u2014'}</td>
         <td><b>${esc(s.fullName)}</b>${s.fromPhoto ? ` <span class="muted" style="font-size:11px;">${t('fromPhotoTag')}</span>` : ''}</td>
         <td>${esc(s.className || '\u2014')}</td>
-        <td>${(s.grades || []).map(g => `<span class="grade ${gradeClass(num(g.value))}" title="${esc(g.subject)}${g.period ? ' \u00B7 ' + esc(periodLabel(g.period)) : ''}">${num(g.value)}</span>`).join(' ') || '<span class="muted">\u2014</span>'}
+        <td>${(s.grades || []).map((g, gi) => `<span class="grade ${gradeClass(num(g.value))}" ${locked ? '' : `data-editgrade="${s.id}:${gi}" role="button" tabindex="0" style="cursor:pointer;"`} title="${esc(g.subject)}${g.period ? ' \u00B7 ' + esc(periodLabel(g.period)) : ''}">${num(g.value)}</span>`).join(' ') || '<span class="muted">\u2014</span>'}
           <button class="link-btn no-print" data-addgrade="${s.id}" style="margin-left:6px;" ${locked ? 'disabled' : ''}>${t('addGradeLink')}</button></td>
         <td><b>${a ? a.toFixed(2) : '\u2014'}</b></td>
         <td><span style="color:${lvl.c};font-weight:700;">${lvl.label}</span>
           <div class="progress-bar" style="margin-top:4px;"><div style="width:${Math.min(100, a / 5 * 100)}%;"></div></div></td>
         <td>${att === null ? '<span class="muted">\u2014</span>' : `<b>${att}%</b>`}</td>
-        <td class="no-print"><button class="link-btn" data-delstudent="${s.id}" style="color:var(--danger);" ${locked ? 'disabled' : ''}>${t('deleteLink')}</button></td>
+        <td style="white-space:nowrap;">
+          <button type="button" data-paystudent="${s.id}" ${locked ? 'disabled' : ''} style="border:none;border-radius:14px;padding:3px 9px;font-size:11.5px;font-weight:700;cursor:pointer;${payStyle(ps.kind)}">${esc(payText(ps))}</button>
+          ${ps.kind === 'ok' || ps.kind === 'soon' || ps.kind === 'overdue' ? `<button class="link-btn no-print" data-quickpay="${s.id}" title="${t('payQuickTitle')}" style="margin-left:4px;font-size:15px;" ${locked ? 'disabled' : ''}>\u2713</button>` : ''}
+        </td>
+        <td class="no-print" style="white-space:nowrap;">
+          <button class="link-btn" data-editstudent="${s.id}" ${locked ? 'disabled' : ''}>${t('editLink')}</button>
+          <button class="link-btn" data-delstudent="${s.id}" style="color:var(--danger);margin-left:8px;" ${locked ? 'disabled' : ''}>${t('deleteLink')}</button></td>
       </tr>`;
     }).join('')}
-    </tbody></table>
+    </tbody></table></div>`}
     <div class="divider"></div>
     <div class="muted">${t('groupAvgLabel')} <b style="color:var(--navy)">${avg.toFixed(2)}</b> / 5.00 &nbsp;\u00B7&nbsp; ${t('groupProgressLabel')} <b style="color:var(--teal)">${withGrades.length ? Math.round(withGrades.filter(s => studentAvg(s) >= 3).length / withGrades.length * 100) : 0}%</b></div>
     `}
@@ -1068,6 +1216,80 @@ function renderGroupPanel(group) {
 function renderModal() {
   if (!state.modal) return '';
   const m = state.modal;
+  if (m.type === 'editStudent') {
+    const s = state.students.find(x => x.id === m.studentId);
+    if (!s) return '';
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:440px;">
+      <h2>${t('editStudentTitle')}</h2>
+      <label>${t('mFioLabel')}</label><input type="text" id="esName" value="${esc(s.fullName || '')}">
+      <label>${t('mClassLabel')}</label><input type="text" id="esClass" value="${esc(s.className || '')}">
+      <div class="grid2">
+        <div><label>${t('birthDateLabel')}</label><input type="date" id="esBirth" value="${esc(s.birthDate || '')}"></div>
+        <div><label>${t('addressLabel')}</label><input type="text" id="esAddress" value="${esc(s.address || '')}"></div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="esSave">${t('mSave')}</button>
+      </div></div></div>`;
+  }
+  if (m.type === 'editGrade') {
+    const s = state.students.find(x => x.id === m.studentId);
+    const g = s ? findGrade(s, m.ref) : null;
+    if (!g) return '';
+    const v = num(g.value);
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:380px;">
+      <h2>${t('editGradeTitle')}</h2>
+      <label>${t('mSubjectShortLabel')}</label><input type="text" id="grSubject" value="${esc(g.subject || '')}">
+      <label>${t('mGradeLabel')}</label>
+      <select id="grValue">${[5, 4, 3, 2].map(n => `<option value="${n}" ${v === n ? 'selected' : ''}>${t(['', '', 'gradeUnsatisfactory', 'gradeSatisfactory', 'gradeGood', 'gradeExcellent'][n])}</option>`).join('')}</select>
+      <label>${t('mPeriodLabel')}</label>
+      <select id="grPeriod">${monthOptionsHTML(monthIndexOf(g.period), true)}</select>
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="grSave">${t('mSave')}</button>
+      </div>
+      <button class="btn btn-danger block" id="grDelete" style="margin-top:10px;">${t('gradeDelete')}</button>
+    </div></div>`;
+  }
+  if (m.type === 'paySettings') {
+    const group = state.groups.find(g => g.id === m.groupId);
+    if (!group) return '';
+    const isOwner = group.teacherId === state.firebaseUser?.uid;
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:440px;">
+      <h2>${t('paySettingsTitle')}</h2>
+      <label>${t('payFeeLabel')}</label><input type="text" inputmode="numeric" id="psFee" value="${num(group.fee) || ''}" ${isOwner ? '' : 'disabled'}>
+      ${isOwner ? '' : `<div class="muted" style="font-size:12px;margin-top:4px;">${t('payOwnerOnly')}</div>`}
+      <label>${t('payDayLabel')}</label><input type="text" inputmode="numeric" id="psDay" value="${validPayDay(group.payDay) || ''}" placeholder="1\u201331">
+      <label class="check-row"><input type="checkbox" id="psApplyAll"> <span>${t('payApplyAll')}</span></label>
+      <div class="muted" style="font-size:12px;margin-top:4px;">${t('payApplyHint')}</div>
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="psSave">${t('mSave')}</button>
+      </div></div></div>`;
+  }
+  if (m.type === 'studentPay') {
+    const s = state.students.find(x => x.id === m.studentId);
+    if (!s) return '';
+    const group = state.groups.find(g => g.id === s.groupId);
+    const ps = payStatus(s);
+    const hist = (Array.isArray(s.payHistory) ? s.payHistory : []).slice().reverse().slice(0, 12);
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:460px;">
+      <h2>${t('payStudentTitle', { name: esc(s.fullName) })}</h2>
+      <div style="margin:6px 0 4px;"><span style="display:inline-block;border-radius:14px;padding:3px 10px;font-size:12px;font-weight:700;${payStyle(ps.kind)}">${esc(payText(ps))}</span></div>
+      <label>${t('payDueLabel')}</label><input type="date" id="spDue" value="${esc(s.payDue || '')}">
+      <button class="btn btn-outline block" id="spSaveDue" style="margin-top:8px;">${t('payDueSave')}</button>
+      <div class="divider"></div>
+      <label>${t('payAmountLabel')}</label><input type="text" inputmode="numeric" id="spAmount" value="${num(group?.fee) || ''}">
+      <button class="btn btn-teal block" id="spMarkPaid" style="margin-top:8px;">${t('payMarkPaid')}</button>
+      <div class="divider"></div>
+      <h3 style="font-size:14px;margin:0 0 8px;">${t('payHistoryTitle')}</h3>
+      ${hist.length === 0 ? `<div class="muted" style="font-size:12.5px;">${t('payHistoryEmpty')}</div>` : hist.map(h => `<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:13px;">
+        <span>${esc(formatDateDMY(new Date(num(h.at))))} \u2014 <b>${fmtMoney(num(h.amount))}</b> ${t('payCurrency')}</span>
+        <span class="muted">${t('payHistoryDue')}: ${esc(fmtDMY(h.due))}</span></div>`).join('')}
+      ${hist.length ? `<button class="link-btn" id="spUndo" style="color:var(--danger);margin-top:8px;">${t('payUndo')}</button>` : ''}
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:16px;">${t('mClose')}</button>
+    </div></div>`;
+  }
   if (m.type === 'newGroup') {
     return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:420px;">
       <h2>${t('mNewGroupTitle')}</h2>
@@ -1337,24 +1559,31 @@ function renderModal() {
   return '';
 }
 
-function monthOptionsHTML() {
-  const names = { uz: ['Yanvar', 'Fevral', 'Mart', 'Aprel', 'May', 'Iyun', 'Iyul', 'Avgust', 'Sentabr', 'Oktabr', 'Noyabr', 'Dekabr'],
-    ru: ['\u042f\u043d\u0432\u0430\u0440\u044c', '\u0424\u0435\u0432\u0440\u0430\u043b\u044c', '\u041c\u0430\u0440\u0442', '\u0410\u043f\u0440\u0435\u043b\u044c', '\u041c\u0430\u0439', '\u0418\u044e\u043d\u044c', '\u0418\u044e\u043b\u044c', '\u0410\u0432\u0433\u0443\u0441\u0442', '\u0421\u0435\u043d\u0442\u044f\u0431\u0440\u044c', '\u041e\u043a\u0442\u044f\u0431\u0440\u044c', '\u041d\u043e\u044f\u0431\u0440\u044c', '\u0414\u0435\u043a\u0430\u0431\u0440\u044c'],
-    en: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'] };
-  const arr = names[getLang()] || names.uz;
-  const now = new Date().getMonth();
-  // Qiymat til-mustaqil (m0..m11): keyinchalik til almashsa ham chorak to'g'ri aniqlanadi.
-  return arr.map((name, i) => `<option value="m${i}" ${i === now ? 'selected' : ''}>${name}</option>`).join('');
+const MONTHS_FULL = {
+  uz: ['Yanvar', 'Fevral', 'Mart', 'Aprel', 'May', 'Iyun', 'Iyul', 'Avgust', 'Sentabr', 'Oktabr', 'Noyabr', 'Dekabr'],
+  ru: ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'],
+  en: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+};
+/** Saqlangan davrni (yangi: "m3", eski: "Aprel" / "April" / "Апрель") oy raqamiga (0-11) o'giradi; topilmasa -1. */
+function monthIndexOf(p) {
+  const v = String(p ?? '');
+  const m = /^m(\d{1,2})$/.exec(v);
+  if (m) return Number(m[1]) <= 11 ? Number(m[1]) : -1;
+  for (const lang in MONTHS_FULL) { const i = MONTHS_FULL[lang].indexOf(v); if (i >= 0) return i; }
+  return -1;
 }
-
-/** Saqlangan davrni (yangi: "m3", eski: "Aprel") joriy tildagi oy nomiga o'giradi. */
+/** Saqlangan davrni joriy tildagi oy nomiga o'giradi (noma'lum bo'lsa — o'zini qaytaradi). */
 function periodLabel(p) {
-  const m = /^m(\d{1,2})$/.exec(String(p ?? ''));
-  if (!m || Number(m[1]) > 11) return String(p ?? '');
-  const names = { uz: ['Yanvar', 'Fevral', 'Mart', 'Aprel', 'May', 'Iyun', 'Iyul', 'Avgust', 'Sentabr', 'Oktabr', 'Noyabr', 'Dekabr'],
-    ru: ['\u042f\u043d\u0432\u0430\u0440\u044c', '\u0424\u0435\u0432\u0440\u0430\u043b\u044c', '\u041c\u0430\u0440\u0442', '\u0410\u043f\u0440\u0435\u043b\u044c', '\u041c\u0430\u0439', '\u0418\u044e\u043d\u044c', '\u0418\u044e\u043b\u044c', '\u0410\u0432\u0433\u0443\u0441\u0442', '\u0421\u0435\u043d\u0442\u044f\u0431\u0440\u044c', '\u041e\u043a\u0442\u044f\u0431\u0440\u044c', '\u041d\u043e\u044f\u0431\u0440\u044c', '\u0414\u0435\u043a\u0430\u0431\u0440\u044c'],
-    en: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'] };
-  return (names[getLang()] || names.uz)[Number(m[1])];
+  const i = monthIndexOf(p);
+  return i >= 0 ? (MONTHS_FULL[getLang()] || MONTHS_FULL.uz)[i] : String(p ?? '');
+}
+/** Oylar ro'yxati. selected: tanlangan oy raqami (standart: joriy oy). withEmpty — "davrsiz" varianti. */
+function monthOptionsHTML(selected, withEmpty) {
+  const arr = MONTHS_FULL[getLang()] || MONTHS_FULL.uz;
+  const sel = selected === undefined ? new Date().getMonth() : selected;
+  // Qiymat til-mustaqil (m0..m11): keyinchalik til almashsa ham chorak to'g'ri aniqlanadi.
+  return (withEmpty ? `<option value="" ${sel < 0 ? 'selected' : ''}>${t('gradeNoPeriod')}</option>` : '')
+    + arr.map((name, i) => `<option value="m${i}" ${i === sel ? 'selected' : ''}>${name}</option>`).join('');
 }
 
 function quarterOfMonth(monthName) {
@@ -1660,7 +1889,7 @@ function attachHandlers() {
     state.modal = { type: 'newGroup' }; render();
   });
   document.querySelectorAll('[data-selectgroup]').forEach(el => el.addEventListener('click', () => {
-    state.activeGroupId = el.dataset.selectgroup; syncActiveGroup(); render();
+    state.activeGroupId = el.dataset.selectgroup; state.studentQuery = ''; syncActiveGroup(); render();
   }));
   document.getElementById('addStudentMenuBtn')?.addEventListener('click', () => { state.modal = { type: 'addStudent', tab: 'manual' }; render(); });
   document.querySelectorAll('[data-addstudenttab]').forEach(el => el.addEventListener('click', () => { state.modal.tab = el.dataset.addstudenttab; render(); }));
@@ -1711,7 +1940,7 @@ function attachHandlers() {
     if (!name) { toast(t('toastEnterName'), 'error'); return; }
     const btn = document.getElementById('amSave'); btn.disabled = true;
     try {
-      await addStudent(state.firebaseUser.uid, state.activeGroupId, { fullName: name, className: cls, birthDate, address });
+      await addStudent(state.firebaseUser.uid, state.activeGroupId, { fullName: name, className: cls, birthDate, address, ...groupPayDefaults() });
       state.modal = null; render();
     } catch (err) {
       toast(friendlyError(err), 'error');
@@ -1737,7 +1966,7 @@ function attachHandlers() {
     if (!name) { toast(t('toastEnterName'), 'error'); return; }
     try {
       await addStudent(state.firebaseUser.uid, state.activeGroupId, {
-        fullName: name, className: cls, photo: selectedPhotoBase64, fromPhoto: !!selectedPhotoBase64
+        fullName: name, className: cls, photo: selectedPhotoBase64, fromPhoto: !!selectedPhotoBase64, ...groupPayDefaults()
       });
       selectedPhotoBase64 = null;
       state.modal = null; render();
@@ -1797,7 +2026,7 @@ function attachHandlers() {
     }
     const btn = document.getElementById('bulkSave'); btn.disabled = true; btn.textContent = t('toastAdding');
     try {
-      await addStudentsBatch(state.firebaseUser.uid, state.activeGroupId, names, cls);
+      await addStudentsBatch(state.firebaseUser.uid, state.activeGroupId, names, cls, groupPayDefaults());
       toast(`${names.length} ${t('toastStudentsAdded')}${skippedDup ? ` (${skippedDup} ${t('toastDupSkipped')})` : ''}`, 'info');
       state.modal = null; render();
     } catch (err) {
@@ -1977,6 +2206,139 @@ function attachHandlers() {
     try { await deleteAd(el.dataset.delad); toast(t('docDeleted'), 'info'); }
     catch (err) { toast(friendlyError(err), 'error'); }
   }));
+  /* Qidiruv va saralash */
+  document.getElementById('studentSearch')?.addEventListener('input', (e) => { state.studentQuery = e.target.value; render(); });
+  document.getElementById('studentSort')?.addEventListener('change', (e) => { state.studentSort = e.target.value; render(); });
+
+  /* O'quvchini tahrirlash */
+  document.querySelectorAll('[data-editstudent]').forEach(el => el.addEventListener('click', () => {
+    state.modal = { type: 'editStudent', studentId: el.dataset.editstudent }; render();
+  }));
+  document.getElementById('esSave')?.addEventListener('click', async () => {
+    const fullName = document.getElementById('esName').value.trim();
+    if (!fullName) { toast(t('toastEnterName'), 'error'); return; }
+    try {
+      await updateStudent(state.modal.studentId, {
+        fullName,
+        className: document.getElementById('esClass').value.trim(),
+        birthDate: document.getElementById('esBirth').value || '',
+        address: document.getElementById('esAddress').value.trim()
+      });
+      toast(t('studentUpdated'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+
+  /* Bahoni tahrirlash / o'chirish */
+  document.querySelectorAll('[data-editgrade]').forEach(el => {
+    const open = () => {
+      const [sid, idx] = el.dataset.editgrade.split(':');
+      const st = state.students.find(x => x.id === sid);
+      const g = st?.grades?.[Number(idx)];
+      if (!g) return;
+      state.modal = { type: 'editGrade', studentId: sid, ref: { date: g.date, subject: g.subject, value: num(g.value) } };
+      render();
+    };
+    el.addEventListener('click', open);
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+  });
+  document.getElementById('grSave')?.addEventListener('click', async () => {
+    const st = state.students.find(x => x.id === state.modal.studentId);
+    const old = st ? findGrade(st, state.modal.ref) : null;
+    const subject = document.getElementById('grSubject').value.trim();
+    if (!old) { state.modal = null; render(); return; }
+    if (!subject) { toast(t('toastEnterSubject'), 'error'); return; }
+    const value = parseInt(document.getElementById('grValue').value);
+    const period = document.getElementById('grPeriod').value || null;
+    try {
+      await setStudentGrades(st.id, st.grades.map(g => g === old ? { ...g, subject, value, period } : g));
+      toast(t('gradeUpdated'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+  document.getElementById('grDelete')?.addEventListener('click', async () => {
+    if (!confirm(t('confirmDeleteGrade'))) return;
+    const st = state.students.find(x => x.id === state.modal.studentId);
+    const old = st ? findGrade(st, state.modal.ref) : null;
+    if (!old) { state.modal = null; render(); return; }
+    try {
+      await setStudentGrades(st.id, st.grades.filter(g => g !== old));
+      toast(t('gradeDeleted'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+
+  /* To'lov: guruh sozlamalari */
+  document.getElementById('payBtn')?.addEventListener('click', () => {
+    state.modal = { type: 'paySettings', groupId: state.activeGroupId }; render();
+  });
+  document.getElementById('psSave')?.addEventListener('click', async () => {
+    const group = state.groups.find(g => g.id === state.modal.groupId);
+    if (!group) return;
+    const isOwner = group.teacherId === state.firebaseUser?.uid;
+    const dayRaw = document.getElementById('psDay').value.trim();
+    const day = dayRaw ? validPayDay(dayRaw) : null;
+    if (dayRaw && !day) { toast(t('payBadDay'), 'error'); return; }
+    const fee = parseInt(String(document.getElementById('psFee').value).replace(/\D/g, '')) || 0;
+    const applyAll = document.getElementById('psApplyAll').checked;
+    const btn = document.getElementById('psSave'); btn.disabled = true;
+    try {
+      if (isOwner) await updateGroupPaySettings(group.id, { fee, payDay: day });
+      if (day) {
+        const today = localDateStr();
+        const targets = state.students.filter(s => s.groupId === group.id && (applyAll || !parseYMD(s.payDue)));
+        const items = targets.map(s => {
+          let due = nextDueFromDay(day, today);
+          // Allaqachon to'langan muddatdan keyingi sanaga qo'yiladi (aks holda to'langan oy "qarz" bo'lib qoladi).
+          while (parseYMD(s.paidThrough) && due <= s.paidThrough) due = addMonthKeepDay(due, day);
+          return { id: s.id, payDue: due, payDay: day };
+        });
+        if (items.length) await applyPayDeadlines(items);
+      }
+      toast(t('paySettingsSaved'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); btn.disabled = false; }
+  });
+
+  /* To'lov: o'quvchi bo'yicha */
+  document.querySelectorAll('[data-paystudent]').forEach(el => el.addEventListener('click', () => {
+    state.modal = { type: 'studentPay', studentId: el.dataset.paystudent }; render();
+  }));
+  document.querySelectorAll('[data-quickpay]').forEach(el => el.addEventListener('click', async () => {
+    const st = state.students.find(x => x.id === el.dataset.quickpay);
+    if (!st) return;
+    const group = state.groups.find(g => g.id === st.groupId);
+    el.disabled = true;
+    try { await markStudentPaid(st, num(group?.fee)); }
+    catch (err) { toast(friendlyError(err), 'error'); el.disabled = false; }
+  }));
+  document.getElementById('spSaveDue')?.addEventListener('click', async () => {
+    const st = state.students.find(x => x.id === state.modal.studentId);
+    const due = document.getElementById('spDue').value;
+    if (!st || !parseYMD(due)) { toast(t('payNoDue'), 'error'); return; }
+    try {
+      await updateStudentPayment(st.id, { payDue: due, payDay: parseYMD(due).d });
+      toast(t('payDueSaved'), 'info');
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+  document.getElementById('spMarkPaid')?.addEventListener('click', async () => {
+    const st = state.students.find(x => x.id === state.modal.studentId);
+    if (!st) return;
+    const amount = parseInt(String(document.getElementById('spAmount').value).replace(/\D/g, '')) || 0;
+    try { await markStudentPaid(st, amount); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+  });
+  document.getElementById('spUndo')?.addEventListener('click', async () => {
+    const st = state.students.find(x => x.id === state.modal.studentId);
+    const hist = Array.isArray(st?.payHistory) ? st.payHistory : [];
+    const last = hist[hist.length - 1];
+    if (!st || !last) return;
+    try {
+      await updateStudentPayment(st.id, { payDue: last.due || '', paidThrough: last.prev || '', payHistory: hist.slice(0, -1) });
+      toast(t('payUndone'), 'info');
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+
   document.getElementById('adCarouselClose')?.addEventListener('click', () => {
     state.adDismissed = true; render();
   });
@@ -2102,6 +2464,8 @@ async function exportGroupToExcel() {
       [t('colAvg')]: a ? Number(a.toFixed(2)) : '',
       [t('colLevel')]: lvl.label,
       [t('colAttendance')]: (() => { const p = studentAttendancePercent(s.id); return p === null ? '' : `${p}%`; })(),
+      [t('payExcelCol')]: payStatus(s).kind === 'none' ? '' : payText(payStatus(s)),
+      [t('payExcelDue')]: fmtDMY(s.payDue),
     };
   });
   const ws = XLSX.utils.json_to_sheet(rows);
