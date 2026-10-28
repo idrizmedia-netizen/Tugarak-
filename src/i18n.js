@@ -322,6 +322,7 @@ const DICT = {
     archiveEmpty: "Arxivda hozircha hech narsa yo'q.",
     archiveGradesCount: "{n} ta baho",
     archiveAvg: "O'rtacha",
+    payStepStudentsFailed: "Guruh sozlamasi saqlandi, lekin o'quvchilarga muddat yozilmadi: {err}",
   },
   ru: {
     appName: "TUGARAK+", tagline: "\u0421\u0438\u0441\u0442\u0435\u043c\u0430 \u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f \u0432\u043d\u0435\u0448\u043a\u043e\u043b\u044c\u043d\u044b\u043c\u0438 \u043a\u0440\u0443\u0436\u043a\u0430\u043c\u0438",
@@ -643,6 +644,7 @@ const DICT = {
     archiveEmpty: "В архиве пока ничего нет.",
     archiveGradesCount: "Оценок: {n}",
     archiveAvg: "Средняя",
+    payStepStudentsFailed: "Настройки группы сохранены, но сроки ученикам не записаны: {err}",
   },
   en: {
     appName: "TUGARAK+", tagline: "A management system for after-school clubs",
@@ -964,6 +966,7 @@ const DICT = {
     archiveEmpty: "The archive is empty.",
     archiveGradesCount: "{n} grades",
     archiveAvg: "Average",
+    payStepStudentsFailed: "Group settings saved, but deadlines were not written to students: {err}",
   },
 };
 
