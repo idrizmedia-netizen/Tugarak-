@@ -19,9 +19,13 @@ const clip = (s, n) => String(s ?? '').trim().slice(0, n);
 function invalid(msg) { const e = new Error(msg || 'invalid'); e.code = 'app/invalid'; return e; }
 const isImageData = (s) => typeof s === 'string' && /^data:image\/(png|jpe?g|webp|gif);base64,/.test(s);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+/* Firestore qoidalari har bir yozuv uchun get()/exists() chaqiradi (isApproved, isGroupMember). Bitta ommaviy so'rovda
+   (writeBatch) bunday chaqiruvlar jami 20 tadan oshsa, butun so'rov "ruxsat yo'q" bilan rad etiladi. Shuning uchun
+   o'quvchi/guruh hujjatlariga ommaviy yozuvlar kichik bo'laklarga bo'linadi: 4 yozuv x ~4 chaqiruv = 16 < 20. */
+const BATCH_SAFE = 4;
 async function deleteRefsInChunks(refs) {
-  for (let i = 0; i < refs.length; i += 400) {
-    const chunk = refs.slice(i, i + 400);
+  for (let i = 0; i < refs.length; i += BATCH_SAFE) {
+    const chunk = refs.slice(i, i + BATCH_SAFE);
     try {
       const batch = writeBatch(db);
       chunk.forEach(r => batch.delete(r));
@@ -40,9 +44,9 @@ async function deleteRefsInChunks(refs) {
 const directoryKey = (email) => encodeURIComponent(String(email || '').trim().toLowerCase());
 export async function syncTeacherDirectory(teachers) {
   const list = teachers.filter(tc => tc.email && tc.id);
-  for (let i = 0; i < list.length; i += 400) {
+  for (let i = 0; i < list.length; i += 15) { // har yozuv uchun 1 ta qoida chaqiruvi (isAdmin) — 20 chegarasidan past
     const batch = writeBatch(db);
-    list.slice(i, i + 400).forEach(tc => {
+    list.slice(i, i + 15).forEach(tc => {
       batch.set(doc(db, 'teacherDirectory', directoryKey(tc.email)), {
         uid: tc.id, fullName: clip(tc.fullName, 100), email: String(tc.email).trim().toLowerCase()
       });
@@ -208,9 +212,9 @@ export async function addStudent(teacherId, groupId, { fullName, className, phot
 /** Ko'p o'quvchini bir yo'la (writeBatch) qo'shadi — bittadan await qilishdan ancha tez va arzon. */
 export async function addStudentsBatch(teacherId, groupId, names, className, pay) {
   const list = names.map(n => clip(n, 120)).filter(Boolean);
-  for (let i = 0; i < list.length; i += 400) {
+  for (let i = 0; i < list.length; i += BATCH_SAFE) {
     const batch = writeBatch(db);
-    list.slice(i, i + 400).forEach(fullName => {
+    list.slice(i, i + BATCH_SAFE).forEach(fullName => {
       batch.set(doc(collection(db, 'students')), {
         teacherId, groupId, fullName, className: clip(className, 40),
         photo: null, fromPhoto: false, birthDate: '', address: '',
@@ -252,9 +256,9 @@ export async function startNewAcademicYear(groupId, students, yearLabel, todaySt
   const label = clip(yearLabel, 20);
   if (!label || !DATE_RE.test(todayStr || '')) throw invalid('year');
   const list = students.filter(s => s.groupId === groupId);
-  for (let i = 0; i < list.length; i += 100) {
+  for (let i = 0; i < list.length; i += BATCH_SAFE) {
     const batch = writeBatch(db);
-    list.slice(i, i + 100).forEach(s => {
+    list.slice(i, i + BATCH_SAFE).forEach(s => {
       const grades = Array.isArray(s.grades) ? s.grades : [];
       if (!grades.length) return;
       const archive = [...(Array.isArray(s.archive) ? s.archive : []), { year: label, archivedAt: Date.now(), grades: sanitizeGrades(grades) }].slice(-10);
@@ -296,9 +300,9 @@ export async function updateStudentPayment(studentId, p) {
 }
 /** Bir nechta o'quvchiga to'lov muddatini bir yo'la belgilaydi: items = [{ id, payDue, payDay }]. */
 export async function applyPayDeadlines(items) {
-  for (let i = 0; i < items.length; i += 400) {
+  for (let i = 0; i < items.length; i += BATCH_SAFE) {
     const batch = writeBatch(db);
-    items.slice(i, i + 400).forEach(it => {
+    items.slice(i, i + BATCH_SAFE).forEach(it => {
       const d = Number(it.payDay);
       if (!DATE_RE.test(it.payDue || '') || !Number.isInteger(d) || d < 1 || d > 31) throw invalid('pay');
       batch.update(doc(db, 'students', it.id), { payDue: it.payDue, payDay: d });
