@@ -83,8 +83,10 @@ export function attachStudentEditPayHandlers() {
     const fee = parseInt(String(document.getElementById('psFee').value).replace(/\D/g, '')) || 0;
     const applyAll = document.getElementById('psApplyAll').checked;
     const btn = document.getElementById('psSave'); btn.disabled = true;
+    let step = 'group';
     try {
       if (isOwner) await updateGroupPaySettings(group.id, { fee, payDay: day });
+      step = 'students';
       if (day) {
         const today = localDateStr();
         const targets = state.students.filter(s => s.groupId === group.id && (applyAll || !parseYMD(s.payDue)));
@@ -98,7 +100,11 @@ export function attachStudentEditPayHandlers() {
       }
       toast(t('paySettingsSaved'), 'info');
       state.modal = null; render();
-    } catch (err) { toast(friendlyError(err), 'error'); btn.disabled = false; }
+    } catch (err) {
+      // Qaysi bosqichda xato chiqqani aniq aytiladi (guruh sozlamasi saqlangan bo'lishi mumkin).
+      toast(step === 'students' ? t('payStepStudentsFailed', { err: friendlyError(err) }) : friendlyError(err), 'error');
+      btn.disabled = false;
+    }
   });
 
   /* To'lov: o'quvchi bo'yicha */
