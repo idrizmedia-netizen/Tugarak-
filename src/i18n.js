@@ -323,6 +323,8 @@ const DICT = {
     archiveGradesCount: "{n} ta baho",
     archiveAvg: "O'rtacha",
     payStepStudentsFailed: "Guruh sozlamasi saqlandi, lekin o'quvchilarga muddat yozilmadi: {err}",
+    payStepGroupFailed: "Guruh sozlamasi saqlanmadi: {err}",
+    adminReportNoData: "Hisobot uchun ma'lumot yo'q.",
   },
   ru: {
     appName: "TUGARAK+", tagline: "\u0421\u0438\u0441\u0442\u0435\u043c\u0430 \u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f \u0432\u043d\u0435\u0448\u043a\u043e\u043b\u044c\u043d\u044b\u043c\u0438 \u043a\u0440\u0443\u0436\u043a\u0430\u043c\u0438",
@@ -645,6 +647,8 @@ const DICT = {
     archiveGradesCount: "Оценок: {n}",
     archiveAvg: "Средняя",
     payStepStudentsFailed: "Настройки группы сохранены, но сроки ученикам не записаны: {err}",
+    payStepGroupFailed: "Настройки группы не сохранены: {err}",
+    adminReportNoData: "Нет данных для отчёта.",
   },
   en: {
     appName: "TUGARAK+", tagline: "A management system for after-school clubs",
@@ -967,6 +971,8 @@ const DICT = {
     archiveGradesCount: "{n} grades",
     archiveAvg: "Average",
     payStepStudentsFailed: "Group settings saved, but deadlines were not written to students: {err}",
+    payStepGroupFailed: "Group settings were not saved: {err}",
+    adminReportNoData: "No data for the report.",
   },
 };
 
