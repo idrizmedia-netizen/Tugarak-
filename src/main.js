@@ -2089,7 +2089,7 @@ function attachHandlers() {
   document.getElementById('quarterlyBtn')?.addEventListener('click', () => { state.modal = { type: 'quarterly', groupId: state.activeGroupId }; render(); });
   document.getElementById('printBtn')?.addEventListener('click', () => printGroupReport());
   document.getElementById('excelExportBtn')?.addEventListener('click', () => exportGroupToExcel());
-  document.getElementById('downloadReportBtn')?.addEventListener('click', () => printGroupReport());
+  document.getElementById('downloadReportBtn')?.addEventListener('click', () => printAdminReport());
   document.querySelectorAll('[data-addgrade]').forEach(el => el.addEventListener('click', () => { state.modal = { type: 'addGrade', studentId: el.dataset.addgrade }; render(); }));
   document.querySelectorAll('[data-delstudent]').forEach(el => el.addEventListener('click', async () => {
     if (!confirm(t('confirmDeleteStudent'))) return;
@@ -2487,7 +2487,7 @@ function attachHandlers() {
     const btn = document.getElementById('psSave'); btn.disabled = true;
     let step = 'group';
     try {
-      if (isOwner) await updateGroupPaySettings(group.id, { fee, payDay: day });
+      if (isOwner) await updateGroupPaySettings(group.id, { fee, payDay: day, ...(Array.isArray(group.coTeachers) ? {} : { fixCoTeachers: true }) });
       step = 'students';
       if (day) {
         const today = localDateStr();
@@ -2504,7 +2504,8 @@ function attachHandlers() {
       state.modal = null; render();
     } catch (err) {
       // Qaysi bosqichda xato chiqqani aniq aytiladi (guruh sozlamasi saqlangan bo'lishi mumkin).
-      toast(step === 'students' ? t('payStepStudentsFailed', { err: friendlyError(err) }) : friendlyError(err), 'error');
+      console.error("To'lov sozlamalarini saqlashda xato (" + step + '):', err);
+      toast(t(step === 'students' ? 'payStepStudentsFailed' : 'payStepGroupFailed', { err: friendlyError(err) }), 'error');
       btn.disabled = false;
     }
   });
@@ -2650,6 +2651,64 @@ function printHtmlDocument(htmlDoc) {
   };
   document.body.appendChild(frame);
   frame.srcdoc = htmlDoc;
+}
+/** Admin uchun butun tizim hisoboti (chop etish / PDF): umumiy ko'rsatkichlar, guruhlar va o'qituvchilar. */
+async function printAdminReport() {
+  await loadAdminDataOnce(true); // eng so'nggi ma'lumot bilan
+  const groups = state.allGroupsAdmin || [];
+  const students = state.allStudentsAdmin || [];
+  const teachers = state.teachers || [];
+  if (!groups.length && !teachers.length) { toast(t('adminReportNoData'), 'error'); return; }
+  const avgOf = (list) => { const g = list.filter(s => s.grades?.length); return g.length ? g.reduce((a, s) => a + studentAvg(s), 0) / g.length : null; };
+  const f2 = (v) => v === null ? '\u2014' : v.toFixed(2);
+  const nameByUid = {}; teachers.forEach(tc => { nameByUid[tc.id] = tc.fullName; });
+  const statusLbl = { approved: t('statApproved'), pending: t('statPending'), rejected: t('statRejected'), blocked: t('statBlocked') };
+  const groupRows = groups.map(g => {
+    const gs = students.filter(s => s.groupId === g.id);
+    return { g, count: gs.length, avg: avgOf(gs) };
+  }).sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1));
+  const approved = teachers.filter(tc => tc.status === 'approved').length;
+  const lang = esc(getLang?.() || 'uz');
+  const title = t('adminReportsTitle').replace(/^[^\p{L}\p{N}]+/u, ''); // chop etishda sarlavhadagi emoji kerak emas
+  const html = `<!doctype html><html lang="${lang}"><head><meta charset="utf-8">
+<title>${esc(title)}</title>
+<style>
+  @page { size: A4; margin: 14mm 12mm; }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, "Helvetica Neue", sans-serif; color: #111; font-size: 12px; margin: 0; }
+  h1 { font-size: 18px; text-align: center; margin: 0 0 4px; }
+  .sub { text-align: center; color: #555; margin-bottom: 14px; font-size: 11px; }
+  h2 { font-size: 13px; margin: 18px 0 6px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { border: 1px solid #444; padding: 4px 6px; vertical-align: top; }
+  th { background: #e9e9e9; -webkit-print-color-adjust: exact; print-color-adjust: exact; font-size: 11px; }
+  thead { display: table-header-group; }
+  tr { page-break-inside: avoid; }
+  .c { text-align: center; }
+  .stats td { text-align: center; font-size: 11px; color: #333; }
+  .stats b { display: block; font-size: 18px; color: #111; }
+</style></head><body>
+<h1>TUGARAK+ \u2014 ${esc(title)}</h1>
+<div class="sub">${esc(t('reportGeneratedAt'))} ${esc(new Date().toLocaleDateString())}</div>
+<table class="stats"><tr>
+  <td><b>${approved}</b>${esc(t('reportTotalTeachers'))}</td>
+  <td><b>${groups.length}</b>${esc(t('reportTotalGroups'))}</td>
+  <td><b>${students.length}</b>${esc(t('reportTotalStudents'))}</td>
+  <td><b>${f2(avgOf(students))}</b>${esc(t('reportAvgScore'))}</td>
+</tr></table>
+<h2>${esc(t('xlsSheetGroups'))}</h2>
+<table><thead><tr><th>${esc(t('colNum'))}</th><th>${esc(t('mGroupNameLabel'))}</th><th>${esc(t('mSubjectShortLabel'))}</th><th>${esc(t('colName'))}</th><th>${esc(t('profileStudents'))}</th><th>${esc(t('colAvg'))}</th></tr></thead><tbody>
+${groupRows.map((r, i) => `<tr><td class="c">${i + 1}</td><td>${esc(r.g.name)}</td><td>${esc(r.g.subject || '')}</td><td>${esc(nameByUid[r.g.teacherId] || '\u2014')}</td><td class="c">${r.count}</td><td class="c"><b>${f2(r.avg)}</b></td></tr>`).join('')}
+</tbody></table>
+<h2>${esc(t('xlsSheetTeachers'))}</h2>
+<table><thead><tr><th>${esc(t('colNum'))}</th><th>${esc(t('colName'))}</th><th>${esc(t('colEmail'))}</th><th>${esc(t('colPhone'))}</th><th>${esc(t('colStatusLbl'))}</th><th>${esc(t('colGroupsN'))}</th><th>${esc(t('colStudentsN'))}</th></tr></thead><tbody>
+${teachers.map((tc, i) => {
+    const gids = groups.filter(g => g.teacherId === tc.id).map(g => g.id);
+    return `<tr><td class="c">${i + 1}</td><td>${esc(tc.fullName || '')}</td><td>${esc(tc.email || '')}</td><td>${esc(tc.phone || '')}</td><td class="c">${esc(statusLbl[tc.status] || '')}</td><td class="c">${gids.length}</td><td class="c">${students.filter(s => gids.includes(s.groupId)).length}</td></tr>`;
+  }).join('')}
+</tbody></table>
+</body></html>`;
+  printHtmlDocument(html);
 }
 function printGroupReport() {
   const group = state.groups.find(g => g.id === state.activeGroupId);
