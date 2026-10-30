@@ -18,7 +18,7 @@ import {
   getAllGroupsAdminOnce, getAllStudentsAdminOnce,
   getWorkPlanOnce, saveWorkPlanItems,
   addStudentsBatch, syncTeacherDirectory,
-  updateStudent, setStudentGrades, updateGroupPaySettings, updateStudentPayment, applyPayDeadlines, startNewAcademicYear
+  updateStudent, setStudentGrades, updateGroupPaySettings, updateStudentPayment, applyPayDeadlines, startNewAcademicYear, updateGroupWeekdays
 } from './db.js';
 import { auth } from './firebase.js';
 import { parseRosterFile, parseWorkPlanFile } from './importParsers.js';
@@ -76,7 +76,8 @@ let state = {
   workPlan: [],
   allGroupsAdmin: [],
   allStudentsAdmin: [],
-  studentQuery: '', studentSort: 'added', teacherQuery: '',
+  studentQuery: '', studentSort: 'nameAsc', teacherQuery: '',
+  groupTab: 'journal', journalMonth: '', journalExtra: {},
 };
 
 let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubUserDoc = null;
@@ -89,6 +90,7 @@ function resetSessionState() {
   state.teachers = []; state.groups = []; state.students = []; state.activeGroupId = null;
   state.notifications = []; state.ads = []; state.groupDocs = []; state.attendance = []; state.workPlan = [];
   state.allGroupsAdmin = []; state.allStudentsAdmin = []; state.modal = null; state.adDismissed = false;
+  state.groupTab = 'journal'; state.journalMonth = ''; state.journalExtra = {};
 }
 
 /** Admin statistikasi uchun guruh va o'quvchilarni BIR MARTA o'qiydi (real-vaqtli tinglovchi o'rniga).
@@ -1203,13 +1205,132 @@ function renderPayBanner(students) {
   </div>`;
 }
 
+/* ---------- JURNAL (maktab jurnali ko'rinishi) ----------
+   Guruhning dars kunlari (group.weekdays: 1=dushanba ... 7=yakshanba) bo'yicha tanlangan oyning sanalari ustun bo'ladi.
+   Baho shu sanaga qo'yiladi: grade.day = "YYYY-MM-DD". Eski baholarda (day yo'q) sana qo'yilgan vaqtidan olinadi,
+   shuning uchun hech qaysi baho yo'qolmaydi. */
+const DATE_STR_RE = /^\d{4}-\d{2}-\d{2}$/;
+function isoWeekday(y, m, d) { const w = new Date(y, m - 1, d).getDay(); return w === 0 ? 7 : w; }
+function gradeDay(g) { return DATE_STR_RE.test(g.day || '') ? g.day : ymdOf(new Date(num(g.date))); }
+function journalMonthKey() { return /^\d{4}-(0[1-9]|1[0-2])$/.test(state.journalMonth || '') ? state.journalMonth : localDateStr().slice(0, 7); }
+function journalMonthTitle(month) {
+  const [y, m] = month.split('-').map(Number);
+  return `${(MONTHS_FULL[getLang()] || MONTHS_FULL.uz)[m - 1]} ${y}`;
+}
+/** Jurnal ustunlari: dars kunlari + (dars kuni bo'lmasa ham) baho qo'yilgan yoki qo'lda qo'shilgan sanalar. */
+function journalColumns(group, students, month) {
+  const [y, m] = month.split('-').map(Number);
+  const wds = Array.isArray(group.weekdays) ? group.weekdays : [];
+  const regular = new Set();
+  for (let d = 1; d <= daysInMonth(y, m); d++) {
+    if (wds.includes(isoWeekday(y, m, d))) regular.add(`${y}-${pad2(m)}-${pad2(d)}`);
+  }
+  const extra = new Set();
+  students.forEach(s => (s.grades || []).forEach(g => { const dd = gradeDay(g); if (dd.startsWith(month) && !regular.has(dd)) extra.add(dd); }));
+  ((state.journalExtra || {})[group.id] || []).forEach(dd => { if (dd.startsWith(month) && !regular.has(dd)) extra.add(dd); });
+  return [...regular].map(day => ({ day, extra: false }))
+    .concat([...extra].map(day => ({ day, extra: true })))
+    .sort((a, b) => a.day.localeCompare(b.day));
+}
+/** "5 — A'lo" kabi nomdan raqam qismini olib tashlaydi (raqam alohida katta ko'rsatiladi). */
+const gradeWord = (key) => t(key).replace(/^\d\s*[\u2014\u2013-]\s*/, '');
+function attendanceOn(day) { return state.attendance.find(a => a.date === day) || null; }
+function isAbsentOn(att, studentId) { return !!att && !!att.records && att.records[studentId] === false; }
+function dayParts(day) { const p = parseYMD(day); return { dn: p ? p.d : '', wd: p ? t('wdShort' + isoWeekday(p.y, p.m, p.d)) : '' }; }
+
+function renderJournal(group, students, shown, locked, isOwner) {
+  const month = journalMonthKey();
+  const wds = Array.isArray(group.weekdays) ? group.weekdays : [];
+  if (!wds.length) {
+    return `<div class="empty"><div class="big-icon">\u{1F4C5}</div><b>${t('journalNoDaysTitle')}</b>
+      <div class="muted" style="margin:6px auto 14px;max-width:460px;">${isOwner ? t('journalNoDaysDesc') : t('journalNoDaysMember')}</div>
+      ${isOwner ? `<button class="btn btn-teal" id="jDaysBtn">${t('journalDaysBtn')}</button>` : ''}</div>`;
+  }
+  const cols = journalColumns(group, students, month);
+  const today = localDateStr();
+  const att = {}; cols.forEach(c => { att[c.day] = attendanceOn(c.day); });
+  const gradeLbl = [['5', 'gradeExcellent'], ['4', 'gradeGood'], ['3', 'gradeSatisfactory'], ['2', 'gradeUnsatisfactory']];
+  return `<div class="jtoolbar no-print">
+      <div class="jnav">
+        <button class="btn btn-outline jbtn" data-jmonth="-1" aria-label="\u2039">\u2039</button>
+        <div class="jmonth">${esc(journalMonthTitle(month))}</div>
+        <button class="btn btn-outline jbtn" data-jmonth="1" aria-label="\u203A">\u203A</button>
+        <button class="btn btn-outline jbtn" data-jmonth="today">${t('journalToday')}</button>
+      </div>
+      <div class="jactions">
+        ${isOwner ? `<button class="btn btn-outline" id="jDaysBtn">${t('journalDaysBtn')}</button>` : ''}
+        ${locked ? '' : `<button class="btn btn-outline" id="jAddDateBtn">${t('journalAddDateBtn')}</button>`}
+        <button class="btn btn-outline" id="jPrintBtn">${t('journalPrintBtn')}</button>
+      </div>
+    </div>
+    <div class="jsched no-print"><span>${t('journalScheduleLabel')}</span>${wds.map(d => `<span class="chip">${t('wdShort' + d)}</span>`).join('')}</div>
+    ${cols.length === 0 ? `<div class="empty">${t('journalMonthEmpty')}</div>` : shown.length === 0 ? `<div class="empty">${t('noSearchResults')}</div>` : `
+    <div class="jwrap"><table class="journal"><thead><tr>
+      <th class="jn">${t('colNum')}</th><th class="jf">${t('colFullName')}</th>
+      ${cols.map(c => { const p = dayParts(c.day); return `<th class="${c.day === today ? 'today' : ''} ${c.extra ? 'extra' : ''}"><button class="jdate" data-jdatehead="${c.day}" title="${t('attendanceBtn')}"><span class="wd">${p.wd}</span><span class="dn">${p.dn}</span></button></th>`; }).join('')}
+    </tr></thead><tbody>
+    ${shown.map((s, i) => `<tr>
+      <td class="jn">${i + 1}</td>
+      <td class="jf"><div class="jname" title="${esc(s.fullName)}">${esc(s.fullName)}</div>${s.className ? `<small>${esc(s.className)}</small>` : ''}</td>
+      ${cols.map(c => {
+        const gs = (s.grades || []).filter(g => gradeDay(g) === c.day);
+        const abs = isAbsentOn(att[c.day], s.id);
+        const inner = gs.length
+          ? gs.map(g => `<span class="grade ${gradeClass(num(g.value))}">${num(g.value)}</span>`).join('') + (abs ? '<i class="jabs-dot"></i>' : '')
+          : (abs ? `<span class="jabs">${t('journalAbsentMark')}</span>` : '');
+        return `<td class="jcell ${c.day === today ? 'today' : ''} ${locked ? 'ro' : ''}" ${locked ? '' : `data-jcell="${s.id}" data-jday="${c.day}" role="button" tabindex="0"`}>${inner}</td>`;
+      }).join('')}
+    </tr>`).join('')}
+    </tbody></table></div>
+    <div class="jlegend no-print">
+      ${gradeLbl.map(([v, k]) => `<span class="i"><span class="grade g${v}">${v}</span>${gradeWord(k)}</span>`).join('')}
+      <span class="i">${t('journalLegendAbsent', { mark: `<span class="jabs" style="margin-right:4px;">${t('journalAbsentMark')}</span>` })}</span>
+      <span class="i"><b style="color:var(--gold);margin-right:4px;">*</b>${t('journalLegendExtra')}</span>
+    </div>
+    <div class="muted no-print" style="font-size:12px;margin-top:6px;">${t('journalLegendHint')}</div>`}`;
+}
+
+function renderStats(group, students, shown, locked) {
+  const withGrades = students.filter(s => s.grades && s.grades.length);
+  const avg = withGrades.length ? withGrades.reduce((a, s) => a + studentAvg(s), 0) / withGrades.length : 0;
+  return `${renderPayBanner(students)}
+    ${shown.length === 0 ? `<div class="empty" style="margin-top:12px;">${t('noSearchResults')}</div>` : `
+    <div style="overflow-x:auto;margin-top:12px;">
+    <table><thead><tr><th>${t('colNum')}</th><th>${t('colPhoto')}</th><th>${t('colFullName')}</th><th>${t('colClass')}</th><th>${t('colAvg')}</th><th>${t('colLevel')}</th><th>${t('colAttendance')}</th><th>${t('payColLabel')}</th><th class="no-print"></th></tr></thead><tbody>
+    ${shown.map((s, i) => {
+      const a = studentAvg(s); const lvl = levelLabel(a);
+      const att = studentAttendancePercent(s.id);
+      const ps = payStatus(s);
+      return `<tr>
+        <td>${i + 1}</td>
+        <td>${s.photo ? `<img class="student-photo" src="${safeImgSrc(s.photo)}">` : '\u2014'}</td>
+        <td><b>${esc(s.fullName)}</b>${s.fromPhoto ? ` <span class="muted" style="font-size:11px;">${t('fromPhotoTag')}</span>` : ''}</td>
+        <td>${esc(s.className || '\u2014')}</td>
+        <td><b>${a ? a.toFixed(2) : '\u2014'}</b>${(s.grades || []).length ? ` <span class="muted" style="font-size:11px;">(${(s.grades || []).length})</span>` : ''}</td>
+        <td><span style="color:${lvl.c};font-weight:700;">${lvl.label}</span>
+          <div class="progress-bar" style="margin-top:4px;"><div style="width:${Math.min(100, a / 5 * 100)}%;"></div></div></td>
+        <td>${att === null ? '<span class="muted">\u2014</span>' : `<b>${att}%</b>`}</td>
+        <td style="white-space:nowrap;">
+          <button type="button" data-paystudent="${s.id}" ${locked ? 'disabled' : ''} style="border:none;border-radius:14px;padding:3px 9px;font-size:11.5px;font-weight:700;cursor:pointer;${payStyle(ps.kind)}">${esc(payText(ps))}</button>
+          ${ps.kind === 'ok' || ps.kind === 'soon' || ps.kind === 'overdue' ? `<button class="link-btn no-print" data-quickpay="${s.id}" title="${t('payQuickTitle')}" style="margin-left:4px;font-size:15px;" ${locked ? 'disabled' : ''}>\u2713</button>` : ''}
+        </td>
+        <td class="no-print" style="white-space:nowrap;">
+          <button class="link-btn" data-editstudent="${s.id}" ${locked ? 'disabled' : ''}>${t('editLink')}</button>
+          ${Array.isArray(s.archive) && s.archive.length ? `<button class="link-btn" data-archive="${s.id}" style="margin-left:8px;">\u{1F4DA} ${t('archiveLink')}</button>` : ''}
+          <button class="link-btn" data-delstudent="${s.id}" style="color:var(--danger);margin-left:8px;" ${locked ? 'disabled' : ''}>${t('deleteLink')}</button></td>
+      </tr>`;
+    }).join('')}
+    </tbody></table></div>`}
+    <div class="divider"></div>
+    <div class="muted">${t('groupAvgLabel')} <b style="color:var(--navy)">${avg.toFixed(2)}</b> / 5.00 &nbsp;\u00B7&nbsp; ${t('groupProgressLabel')} <b style="color:var(--teal)">${withGrades.length ? Math.round(withGrades.filter(s => studentAvg(s) >= 3).length / withGrades.length * 100) : 0}%</b></div>`;
+}
+
 function renderGroupPanel(group) {
   const locked = isGroupLocked(group);
   const students = state.students.filter(s => s.groupId === group.id);
   const shown = visibleStudents(students);
-  const withGrades = students.filter(s => s.grades && s.grades.length);
-  const avg = withGrades.length ? withGrades.reduce((a, s) => a + studentAvg(s), 0) / withGrades.length : 0;
   const isOwner = group.teacherId === state.firebaseUser?.uid;
+  const tab = state.groupTab === 'stats' ? 'stats' : 'journal';
   const sortOpt = (v, key) => `<option value="${v}" ${state.studentSort === v ? 'selected' : ''}>${t(key)}</option>`;
   return `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
@@ -1224,52 +1345,19 @@ function renderGroupPanel(group) {
       </div>
     </div>
     ${locked ? `<div class="error-box" style="margin-top:12px;"><b>${t('groupLockedTitle')}</b><br>${t('groupLockedMsg')} <button class="link-btn" data-navto="subscription">${t('subRenewBtn')}</button></div>` : ''}
-    ${renderPayBanner(students)}
     <div class="divider"></div>
     ${students.length === 0 ? `<div class="empty"><div class="big-icon">\u{1F9D2}</div>${t('emptyStudents')}</div>` : `
+    <div class="gtabs no-print">
+      <button class="${tab === 'journal' ? 'active' : ''}" data-grouptab="journal">${t('tabJournal')}</button>
+      <button class="${tab === 'stats' ? 'active' : ''}" data-grouptab="stats">${t('tabStats')}</button>
+    </div>
     <div class="no-print" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
       <input type="text" id="studentSearch" placeholder="${t('searchPh')}" value="${esc(state.studentQuery)}" style="flex:1;min-width:180px;">
       <select id="studentSort" style="flex:0 1 260px;">
         ${sortOpt('added', 'sortAdded')}${sortOpt('nameAsc', 'sortNameAsc')}${sortOpt('avgDesc', 'sortAvgDesc')}${sortOpt('avgAsc', 'sortAvgAsc')}${sortOpt('pay', 'sortPay')}
       </select>
     </div>
-    <div style="display:none;" class="jurnal-header" id="jurnalHeader">
-      <h2 style="text-align:center;margin:0 0 4px;">TO'GARAK JURNALI</h2>
-      <p style="text-align:center;margin:0 0 4px;">"${esc(group.name)}" to'garagi \u2014 ${esc(group.subject)}</p>
-      <p style="text-align:center;margin:0 0 16px;">Rahbar: ${esc(state.userDoc?.fullName || '')} &nbsp;\u00B7&nbsp; ${new Date().getFullYear()}-${new Date().getFullYear() + 1} o'quv yili</p>
-    </div>
-    ${shown.length === 0 ? `<div class="empty">${t('noSearchResults')}</div>` : `
-    <div style="overflow-x:auto;">
-    <table><thead><tr><th>${t('colNum')}</th><th>${t('colPhoto')}</th><th>${t('colFullName')}</th><th>${t('colClass')}</th><th>${t('colGrades')}</th><th>${t('colAvg')}</th><th>${t('colLevel')}</th><th>${t('colAttendance')}</th><th>${t('payColLabel')}</th><th class="no-print"></th></tr></thead><tbody>
-    ${shown.map((s, i) => {
-      const a = studentAvg(s); const lvl = levelLabel(a);
-      const att = studentAttendancePercent(s.id);
-      const ps = payStatus(s);
-      return `<tr>
-        <td>${i + 1}</td>
-        <td>${s.photo ? `<img class="student-photo" src="${safeImgSrc(s.photo)}">` : '\u2014'}</td>
-        <td><b>${esc(s.fullName)}</b>${s.fromPhoto ? ` <span class="muted" style="font-size:11px;">${t('fromPhotoTag')}</span>` : ''}</td>
-        <td>${esc(s.className || '\u2014')}</td>
-        <td>${(s.grades || []).map((g, gi) => `<span class="grade ${gradeClass(num(g.value))}" ${locked ? '' : `data-editgrade="${s.id}:${gi}" role="button" tabindex="0" style="cursor:pointer;"`} title="${esc(g.subject)}${g.period ? ' \u00B7 ' + esc(periodLabel(g.period)) : ''}">${num(g.value)}</span>`).join(' ') || '<span class="muted">\u2014</span>'}
-          <button class="link-btn no-print" data-addgrade="${s.id}" style="margin-left:6px;" ${locked ? 'disabled' : ''}>${t('addGradeLink')}</button>
-          ${Array.isArray(s.archive) && s.archive.length ? `<button class="link-btn no-print" data-archive="${s.id}" style="margin-left:6px;">\u{1F4DA} ${t('archiveLink')}</button>` : ''}</td>
-        <td><b>${a ? a.toFixed(2) : '\u2014'}</b></td>
-        <td><span style="color:${lvl.c};font-weight:700;">${lvl.label}</span>
-          <div class="progress-bar" style="margin-top:4px;"><div style="width:${Math.min(100, a / 5 * 100)}%;"></div></div></td>
-        <td>${att === null ? '<span class="muted">\u2014</span>' : `<b>${att}%</b>`}</td>
-        <td style="white-space:nowrap;">
-          <button type="button" data-paystudent="${s.id}" ${locked ? 'disabled' : ''} style="border:none;border-radius:14px;padding:3px 9px;font-size:11.5px;font-weight:700;cursor:pointer;${payStyle(ps.kind)}">${esc(payText(ps))}</button>
-          ${ps.kind === 'ok' || ps.kind === 'soon' || ps.kind === 'overdue' ? `<button class="link-btn no-print" data-quickpay="${s.id}" title="${t('payQuickTitle')}" style="margin-left:4px;font-size:15px;" ${locked ? 'disabled' : ''}>\u2713</button>` : ''}
-        </td>
-        <td class="no-print" style="white-space:nowrap;">
-          <button class="link-btn" data-editstudent="${s.id}" ${locked ? 'disabled' : ''}>${t('editLink')}</button>
-          <button class="link-btn" data-delstudent="${s.id}" style="color:var(--danger);margin-left:8px;" ${locked ? 'disabled' : ''}>${t('deleteLink')}</button></td>
-      </tr>`;
-    }).join('')}
-    </tbody></table></div>`}
-    <div class="divider"></div>
-    <div class="muted">${t('groupAvgLabel')} <b style="color:var(--navy)">${avg.toFixed(2)}</b> / 5.00 &nbsp;\u00B7&nbsp; ${t('groupProgressLabel')} <b style="color:var(--teal)">${withGrades.length ? Math.round(withGrades.filter(s => studentAvg(s) >= 3).length / withGrades.length * 100) : 0}%</b></div>
-    `}
+    ${tab === 'journal' ? renderJournal(group, students, shown, locked, isOwner) : renderStats(group, students, shown, locked)}`}
   </div>`;
 }
 
@@ -1277,6 +1365,44 @@ function renderGroupPanel(group) {
 function renderModal() {
   if (!state.modal) return '';
   const m = state.modal;
+  if (m.type === 'journalCell') {
+    const st = state.students.find(x => x.id === m.studentId);
+    if (!st) return '';
+    const gs = (st.grades || []).filter(g => gradeDay(g) === m.day);
+    const abs = isAbsentOn(attendanceOn(m.day), st.id);
+    const cur = gs.length === 1 ? num(gs[0].value) : 0;
+    const lbl = { 5: 'gradeExcellent', 4: 'gradeGood', 3: 'gradeSatisfactory', 2: 'gradeUnsatisfactory' };
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:420px;">
+      <h2 style="font-size:18px;">${t('journalCellTitle', { name: esc(st.fullName), date: esc(fmtDMY(m.day)) })}</h2>
+      ${abs ? `<div class="info-box" style="margin:8px 0;color:var(--danger);">${t('journalAbsentNote')}</div>` : ''}
+      ${gs.length ? `<div class="muted" style="font-size:12px;margin-top:8px;">${t('journalCurrent')}</div>
+        <div class="jcurrent">${gs.map((g, i) => `<span class="it"><span class="grade ${gradeClass(num(g.value))}">${num(g.value)}</span><button class="x" data-jdelgrade="${i}" title="${t('journalClear')}">\u2715</button></span>`).join('')}</div>` : ''}
+      <div class="muted" style="font-size:12px;margin-top:10px;">${t('journalChoose')}</div>
+      <div class="jvalues">${[5, 4, 3, 2].map(n => `<button class="jvalue g${n} ${cur === n ? 'cur' : ''}" data-jvalue="${n}"><b>${n}</b><span>${gradeWord(lbl[n])}</span></button>`).join('')}</div>
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:14px;">${t('mClose')}</button>
+    </div></div>`;
+  }
+  if (m.type === 'journalDays') {
+    const draft = Array.isArray(m.draft) ? m.draft : [];
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:460px;">
+      <h2>${t('journalDaysTitle')}</h2>
+      <div class="muted">${t('journalDaysHint')}</div>
+      <div class="jdchips">${[1, 2, 3, 4, 5, 6, 7].map(d => `<button type="button" class="jdchip ${draft.includes(d) ? 'on' : ''}" data-jdtoggle="${d}">${t('wdFull' + d)}</button>`).join('')}</div>
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="jdSave">${t('mSave')}</button>
+      </div></div></div>`;
+  }
+  if (m.type === 'journalAddDate') {
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:400px;">
+      <h2>${t('journalAddDateTitle')}</h2>
+      <div class="muted">${t('journalAddDateDesc')}</div>
+      <label>${t('journalDateLabel')}</label><input type="date" id="jadDate" value="${localDateStr()}">
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button class="btn btn-outline block" id="modalCancel">${t('cancel')}</button>
+        <button class="btn btn-teal block" id="jadSave">${t('journalAdd')}</button>
+      </div></div></div>`;
+  }
   if (m.type === 'newYear') {
     const students = state.students.filter(x => x.groupId === m.groupId);
     const withG = students.filter(x => (x.grades || []).length);
@@ -2059,6 +2185,84 @@ function attachHandlers() {
     loadGroupDocsOnce().then(render).catch(err => toast(friendlyError(err), 'error'));
   });
   document.querySelectorAll('[data-docstab]').forEach(el => el.addEventListener('click', () => { state.modal.tab = el.dataset.docstab; render(); }));
+  /* Guruh bo'limlari (Jurnal / Ko'rsatkichlar) va jurnal */
+  document.querySelectorAll('[data-grouptab]').forEach(el => el.addEventListener('click', () => { state.groupTab = el.dataset.grouptab; render(); }));
+  document.querySelectorAll('[data-jmonth]').forEach(el => el.addEventListener('click', () => {
+    const v = el.dataset.jmonth;
+    if (v === 'today') state.journalMonth = localDateStr().slice(0, 7);
+    else {
+      const [y, m] = journalMonthKey().split('-').map(Number);
+      const d = new Date(y, m - 1 + Number(v), 1);
+      state.journalMonth = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+    }
+    render();
+  }));
+  document.querySelectorAll('[data-jdatehead]').forEach(el => el.addEventListener('click', () => {
+    state.modal = { type: 'attendance', groupId: state.activeGroupId, date: el.dataset.jdatehead }; render();
+  }));
+  document.querySelectorAll('[data-jcell]').forEach(el => {
+    const open = () => { state.modal = { type: 'journalCell', studentId: el.dataset.jcell, day: el.dataset.jday }; render(); };
+    el.addEventListener('click', open);
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+  });
+  document.querySelectorAll('[data-jvalue]').forEach(el => el.addEventListener('click', async () => {
+    const st = state.students.find(x => x.id === state.modal.studentId);
+    const group = state.groups.find(g => g.id === state.activeGroupId);
+    if (!st || !group) return;
+    const day = state.modal.day;
+    const v = parseInt(el.dataset.jvalue);
+    const gs = (st.grades || []).filter(g => gradeDay(g) === day);
+    try {
+      if (gs.length === 1) await setStudentGrades(st.id, st.grades.map(g => g === gs[0] ? { ...g, value: v, day } : g));
+      else await addGrade(st.id, group.subject || group.name, v, 'm' + (Number(day.slice(5, 7)) - 1), day);
+      toast(t('journalGradeSaved'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  }));
+  document.querySelectorAll('[data-jdelgrade]').forEach(el => el.addEventListener('click', async () => {
+    const st = state.students.find(x => x.id === state.modal.studentId);
+    if (!st) return;
+    const target = (st.grades || []).filter(g => gradeDay(g) === state.modal.day)[Number(el.dataset.jdelgrade)];
+    if (!target) return;
+    try {
+      await setStudentGrades(st.id, st.grades.filter(g => g !== target));
+      toast(t('gradeDeleted'), 'info');
+      state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  }));
+  document.getElementById('jDaysBtn')?.addEventListener('click', () => {
+    const g = state.groups.find(x => x.id === state.activeGroupId);
+    state.modal = { type: 'journalDays', groupId: state.activeGroupId, draft: [...(Array.isArray(g?.weekdays) ? g.weekdays : [])] }; render();
+  });
+  document.querySelectorAll('[data-jdtoggle]').forEach(el => el.addEventListener('click', () => {
+    const d = Number(el.dataset.jdtoggle);
+    const draft = Array.isArray(state.modal.draft) ? state.modal.draft : [];
+    state.modal.draft = draft.includes(d) ? draft.filter(x => x !== d) : [...draft, d];
+    render();
+  }));
+  document.getElementById('jdSave')?.addEventListener('click', async () => {
+    const draft = Array.isArray(state.modal.draft) ? state.modal.draft : [];
+    if (!draft.length) { toast(t('journalDaysNeed'), 'error'); return; }
+    const g = state.groups.find(x => x.id === state.modal.groupId);
+    if (!g) return;
+    const btn = document.getElementById('jdSave'); btn.disabled = true;
+    try {
+      await updateGroupWeekdays(g.id, draft, !Array.isArray(g.coTeachers));
+      toast(t('journalDaysSaved'), 'info');
+      state.modal = null; render();
+    } catch (err) { console.error('Dars kunlarini saqlashda xato:', err); toast(friendlyError(err), 'error'); btn.disabled = false; }
+  });
+  document.getElementById('jAddDateBtn')?.addEventListener('click', () => { state.modal = { type: 'journalAddDate', groupId: state.activeGroupId }; render(); });
+  document.getElementById('jadSave')?.addEventListener('click', () => {
+    const date = document.getElementById('jadDate').value;
+    if (!parseYMD(date)) return;
+    const gid = state.modal.groupId;
+    const list = (state.journalExtra[gid] ||= []);
+    if (!list.includes(date)) list.push(date);
+    state.journalMonth = date.slice(0, 7);
+    state.modal = null; render();
+  });
+  document.getElementById('jPrintBtn')?.addEventListener('click', () => printJournal());
   document.getElementById('attendanceBtn')?.addEventListener('click', () => { state.modal = { type: 'attendance', groupId: state.activeGroupId }; render(); });
   document.getElementById('reportsMenuBtn')?.addEventListener('click', () => { state.modal = { type: 'reportsMenu' }; render(); });
   document.getElementById('groupSettingsBtn')?.addEventListener('click', () => { state.modal = { type: 'groupSettings' }; render(); });
@@ -2715,6 +2919,46 @@ function printGroupReport() {
   const students = state.students.filter(s => s.groupId === state.activeGroupId);
   if (!group || !students.length) { toast(t('printNoStudents'), 'error'); return; }
   printHtmlDocument(buildReportHTML(group, students));
+}
+
+/** Tanlangan oyning jurnalini (A4, albom) chop etadi / PDF qiladi. */
+function printJournal() {
+  const group = state.groups.find(g => g.id === state.activeGroupId);
+  const students = state.students.filter(s => s.groupId === state.activeGroupId);
+  if (!group || !students.length) { toast(t('printNoStudents'), 'error'); return; }
+  const month = journalMonthKey();
+  const cols = journalColumns(group, students, month);
+  const sorted = students.slice().sort((a, b) => (a.fullName || '').localeCompare(b.fullName || '', 'uz'));
+  const att = {}; cols.forEach(c => { att[c.day] = attendanceOn(c.day); });
+  const html = `<!doctype html><html lang="${esc(getLang())}"><head><meta charset="utf-8"><title>${esc(t('journalPrintTitle'))}</title>
+<style>
+  @page { size: A4 landscape; margin: 10mm; }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, "Helvetica Neue", sans-serif; color: #111; font-size: 11px; margin: 0; }
+  h1 { font-size: 17px; text-align: center; margin: 0 0 3px; }
+  .sub { text-align: center; color: #333; margin-bottom: 10px; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  th, td { border: 1px solid #444; padding: 3px 2px; text-align: center; }
+  th { background: #e9e9e9; -webkit-print-color-adjust: exact; print-color-adjust: exact; font-size: 10px; }
+  th small { display: block; font-weight: 400; font-size: 8.5px; color: #555; }
+  td.n { width: 22px; } td.f { width: 150px; text-align: left; padding-left: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  td.g { font-weight: 700; font-size: 12px; height: 20px; } td.a { color: #b00; font-weight: 700; }
+  tr { page-break-inside: avoid; } thead { display: table-header-group; }
+  .foot { display: flex; justify-content: space-between; margin-top: 18px; font-size: 12px; }
+</style></head><body>
+<h1>${esc(t('journalPrintTitle'))} \u2014 ${esc(journalMonthTitle(month))}</h1>
+<div class="sub">${esc(group.name)} \u00B7 ${esc(group.subject || '')} \u00B7 ${esc(t('journalTeacher'))}: ${esc(state.userDoc?.fullName || '')}</div>
+<table><thead><tr><th class="n">${esc(t('colNum'))}</th><th class="f">${esc(t('colFullName'))}</th>
+${cols.map(c => { const p = dayParts(c.day); return `<th>${p.dn}<small>${esc(p.wd)}</small></th>`; }).join('')}</tr></thead><tbody>
+${sorted.map((s, i) => `<tr><td class="n">${i + 1}</td><td class="f">${esc(s.fullName)}</td>${cols.map(c => {
+    const gs = (s.grades || []).filter(g => gradeDay(g) === c.day);
+    if (gs.length) return `<td class="g">${gs.map(g => num(g.value)).join('/')}</td>`;
+    return isAbsentOn(att[c.day], s.id) ? `<td class="g a">${esc(t('journalAbsentMark'))}</td>` : '<td class="g"></td>';
+  }).join('')}</tr>`).join('')}
+</tbody></table>
+<div class="foot"><span>${esc(t('journalTeacher'))}: ______________________</span><span>${esc(t('journalLegendAbsent', { mark: t('journalAbsentMark') }))}</span></div>
+</body></html>`;
+  printHtmlDocument(html);
 }
 
 /** Tanlangan oy uchun davomat jadvali: darslar, har o'quvchi belgilari, foizlar, eng ko'p qoldirganlar. */
