@@ -56,6 +56,16 @@ reklama va bildirishnomalar. Uch tilli interfeys (uz / ru / en), tun/kun rejimi,
   yo'qligiga ishonch hosil qilgach, `Content-Security-Policy-Report-Only` kalitini `Content-Security-Policy`
   ga o'zgartiring.
 
+## Jurnal (maktab jurnali ko'rinishi)
+
+- Guruh sahifasida ikki bo'lim bor: **📒 Jurnal** va **📊 Ko'rsatkichlar** (o'rtacha, daraja, davomat foizi, to'lov, tahrirlash).
+- Guruh egasi **📅 Dars kunlari** orqali hafta kunlarini tanlaydi (masalan Du, Chor, Ju); tanlangan oyning shu kunlari
+  jurnalda sana ustunlari bo'ladi (`groups/{id}.weekdays`, 1=dushanba ... 7=yakshanba).
+- Katakni bosib baho (5/4/3/2) qo'yiladi; baho shu sanaga yoziladi (`grade.day = "YYYY-MM-DD"`). Eski baholar
+  (`day` yo'q) qo'yilgan sanasi bo'yicha ko'rinadi — dars kuni bo'lmasa, `*` belgili qo'shimcha ustunda.
+- Sana sarlavhasini bosish shu kun davomatini ochadi; davomatda kelmagan o'quvchi katakda **Y** belgisi bilan ko'rinadi.
+- **＋ Sana** dars kunidan tashqari sanani qo'shish, **🖨 Chop etish** oylik jurnalni A4 (albom) chop etish/PDF uchun.
+
 ## App Check yoqish (reCAPTCHA v3)
 
 Tartibga qat'iy rioya qiling: avval kalit va deploy, **oxirida** Enforce. Aks holda hamma foydalanuvchi bloklanib qoladi.
