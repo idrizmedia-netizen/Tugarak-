@@ -3,6 +3,8 @@ import {
   query, where, orderBy, limit, writeBatch, onSnapshot as _onSnapshot, serverTimestamp, arrayUnion, arrayRemove, deleteField, Timestamp
 } from 'firebase/firestore';
 import { db } from './firebase.js';
+import { clip, invalid } from './lib/safe.js';
+import { sanitizeGrades, qGradesOf, Q_KEYS } from './lib/grades.js';
 
 // Barcha real-vaqt tinglovchilar uchun xato ishlovchisi. Xato ishlovchisi bo'lmasa,
 // permission-denied kabi xatolar "Uncaught" bo'lib qoladi va Firestore SDK'ning
@@ -15,8 +17,6 @@ function onSnapshot(ref, next, onError) {
 }
 
 /* ---------- yordamchilar: kiritilgan ma'lumotni tozalash va tekshirish ---------- */
-const clip = (s, n) => String(s ?? '').trim().slice(0, n);
-function invalid(msg) { const e = new Error(msg || 'invalid'); e.code = 'app/invalid'; return e; }
 const isImageData = (s) => typeof s === 'string' && /^data:image\/(png|jpe?g|webp|gif);base64,/.test(s);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /* Firestore qoidalari har bir yozuv uchun get()/exists() chaqiradi (isApproved, isGroupMember). Bitta ommaviy so'rovda
@@ -146,7 +146,7 @@ export async function deleteGroup(groupId) {
   // Guruhga tegishli BARCHA ma'lumot o'chiriladi: o'quvchilar, davomat, hujjatlar (ular katta
   // base64 fayllar bo'lishi mumkin) va yillik ish reja. Avval bolalar, eng oxirida guruhning o'zi
   // o'chiriladi (qoidalar guruh mavjud bo'lganda ruxsat beradi).
-  for (const col of ['students', 'attendance', 'groupDocs']) {
+  for (const col of ['students', 'attendance', 'groupDocs', 'parentLinks']) {
     try {
       const snap = await getDocs(query(collection(db, col), where('groupId', '==', groupId)));
       await deleteRefsInChunks(snap.docs.map(d => d.ref));
@@ -233,18 +233,6 @@ export async function updateStudent(studentId, { fullName, className, birthDate,
     birthDate: DATE_RE.test(birthDate || '') ? birthDate : '', address: clip(address, 200)
   });
 }
-/** Baholar ro'yxatini tekshirib, tozalangan nusxasini qaytaradi (eng ko'pi 300 ta). */
-function sanitizeGrades(grades) {
-  return (grades || []).slice(0, 300).map(g => {
-    const v = Number(g.value);
-    const sub = clip(g.subject, 60);
-    if (!Number.isInteger(v) || v < 1 || v > 5 || !sub) throw invalid('grade');
-    const date = Number(g.date);
-    const out = { subject: sub, value: v, date: Number.isFinite(date) ? date : Date.now(), period: g.period ? clip(g.period, 20) : null };
-    if (DATE_RE.test(g.day || '')) out.day = g.day; // jurnal dars sanasi
-    return out;
-  });
-}
 /** Baholar ro'yxatini to'liq almashtiradi (bahoni tahrirlash/o'chirish uchun). */
 export async function setStudentGrades(studentId, grades) {
   await updateDoc(doc(db, 'students', studentId), { grades: sanitizeGrades(grades) });
@@ -262,9 +250,13 @@ export async function startNewAcademicYear(groupId, students, yearLabel, todaySt
     const batch = writeBatch(db);
     list.slice(i, i + BATCH_SAFE).forEach(s => {
       const grades = Array.isArray(s.grades) ? s.grades : [];
-      if (!grades.length) return;
-      const archive = [...(Array.isArray(s.archive) ? s.archive : []), { year: label, archivedAt: Date.now(), grades: sanitizeGrades(grades) }].slice(-10);
-      batch.update(doc(db, 'students', s.id), { archive, grades: [] });
+      const qg = qGradesOf(s);
+      const hasQ = Object.keys(qg).length > 0;
+      if (!grades.length && !hasQ) return;
+      const entry = { year: label, archivedAt: Date.now(), grades: sanitizeGrades(grades) };
+      if (hasQ) entry.qGrades = qg;
+      const archive = [...(Array.isArray(s.archive) ? s.archive : []), entry].slice(-10);
+      batch.update(doc(db, 'students', s.id), hasQ ? { archive, grades: [], qGrades: deleteField() } : { archive, grades: [] });
     });
     await batch.commit();
   }
@@ -322,6 +314,15 @@ export async function applyPayDeadlines(items) {
     });
     await batch.commit();
   }
+}
+
+/** Chorak/yillik bahoni qo'lda qo'yadi (key: q1..q4 | year, value: 1..5) yoki olib tashlaydi (value: null). */
+export async function setStudentQGrade(studentId, key, value) {
+  if (!Q_KEYS.includes(key)) throw invalid('qgrade');
+  if (value === null) { await updateDoc(doc(db, 'students', studentId), { [`qGrades.${key}`]: deleteField() }); return; }
+  const v = Number(value);
+  if (!Number.isInteger(v) || v < 1 || v > 5) throw invalid('qgrade');
+  await updateDoc(doc(db, 'students', studentId), { [`qGrades.${key}`]: v });
 }
 
 export async function deleteStudent(studentId) {
@@ -489,4 +490,40 @@ export async function getAllGroupsAdminOnce() {
 export async function getAllStudentsAdminOnce() {
   const snap = await getDocs(collection(db, 'students'));
   return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+
+/* ---------- ota-onalar uchun faqat o'qish havolasi ----------
+   parentLinks/{kalit}: kalitni bilgan kishi faqat shu hujjatni o'qiy oladi (qoidalarda `get` ochiq, `list` yopiq).
+   Hujjatda faqat ism, guruh nomi, baholar, davomat va chorak baholari bor (lib/parentLink.js). */
+export async function createParentLink(teacherId, token, snap) {
+  await setDoc(doc(db, 'parentLinks', token), {
+    teacherId, groupId: snap.groupId, studentId: snap.studentId,
+    studentName: snap.studentName, groupName: snap.groupName, subject: snap.subject,
+    grades: snap.grades, attendance: snap.attendance, qGrades: snap.qGrades,
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp()
+  });
+}
+export async function updateParentLink(token, snap) {
+  await updateDoc(doc(db, 'parentLinks', token), {
+    studentName: snap.studentName, groupName: snap.groupName, subject: snap.subject,
+    grades: snap.grades, attendance: snap.attendance, qGrades: snap.qGrades,
+    updatedAt: serverTimestamp()
+  });
+}
+export async function deleteParentLink(token) {
+  await deleteDoc(doc(db, 'parentLinks', token));
+}
+export async function getGroupParentLinks(groupId) {
+  const snap = await getDocs(query(collection(db, 'parentLinks'), where('groupId', '==', groupId)));
+  return snap.docs.map(d => ({ token: d.id, ...d.data() }));
+}
+/** O'quvchi o'chirilganda uning ommaviy havolasi ham o'chiriladi (qolib ketmasligi uchun). */
+export async function deleteParentLinksForStudent(groupId, studentId) {
+  const snap = await getDocs(query(collection(db, 'parentLinks'), where('groupId', '==', groupId), where('studentId', '==', studentId)));
+  await Promise.all(snap.docs.map(d => deleteDoc(d.ref)));
+}
+/** Ota-ona sahifasi (kirishsiz): faqat bitta hujjat, kalit bo'yicha. Topilmasa — null. */
+export async function getParentLinkPublic(token) {
+  const snap = await getDoc(doc(db, 'parentLinks', token));
+  return snap.exists() ? snap.data() : null;
 }
