@@ -7,5 +7,10 @@ export default defineConfig({
   },
   server: {
     port: 5173
+  },
+  // `npm test` — vitest (src/lib dagi toza mantiq va qoidalar fayli tekshiruvlari)
+  test: {
+    environment: 'jsdom',
+    include: ['tests/**/*.test.js']
   }
 });
