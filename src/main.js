@@ -18,11 +18,22 @@ import {
   getAllGroupsAdminOnce, getAllStudentsAdminOnce,
   getWorkPlanOnce, saveWorkPlanItems,
   addStudentsBatch, syncTeacherDirectory,
-  updateStudent, setStudentGrades, updateGroupPaySettings, updateStudentPayment, applyPayDeadlines, startNewAcademicYear, updateGroupWeekdays
+  updateStudent, setStudentGrades, updateGroupPaySettings, updateStudentPayment, applyPayDeadlines, startNewAcademicYear, updateGroupWeekdays,
+  setStudentQGrade, createParentLink, updateParentLink, deleteParentLink, getGroupParentLinks, getParentLinkPublic, deleteParentLinksForStudent
 } from './db.js';
 import { auth } from './firebase.js';
 import { parseRosterFile, parseWorkPlanFile } from './importParsers.js';
-import { t, LANGS, getLang, setLang, contractText } from './i18n.js';
+import { t, tl, LANGS, getLang, setLang, contractText } from './i18n.js';
+import { esc, num, safeImgSrc, safeFileHref, safeHttpUrl } from './lib/safe.js';
+import { DATE_STR_RE, pad2, localDateStr, ymdOf, parseYMD, daysInMonth, daysBetween, addMonthKeepDay, nextDueFromDay, validPayDay, fmtDMY, isoWeekday } from './lib/dates.js';
+import { MONTHS_FULL, monthIndexOf, quarterOfMonth, monthShort } from './lib/months.js';
+import { gradeDay, validGradeValues, studentAvg, academicYearRange, quarterSummary, monthAverage, qGradesOf } from './lib/grades.js';
+import { PAY_WARN_DAYS, payStatus, fmtMoney, reminderText, telegramShareUrl, smsUrl } from './lib/pay.js';
+import { buildJournalColumns, decideJournalKey, planGradeWrite, planGradeClear, buildJournalSheet } from './lib/journal.js';
+import { monthlyGroupAverages, attendanceMonthly, topGrowers } from './lib/stats.js';
+import { lineChartSVG } from './lib/charts.js';
+import { newParentToken, parentTokenFromPath, parentUrl, buildParentSnapshot } from './lib/parentLink.js';
+import { parentPageHTML } from './lib/parentView.js';
 
 /** Rasmni kichraytirib, siqilgan base64 (JPEG) shaklga o'giradi.
  *  Firebase Storage o'rniga to'g'ridan-to'g'ri Firestore'da saqlash uchun
@@ -54,6 +65,7 @@ function fileToCompressedBase64(file, maxWidth = 480, quality = 0.6) {
 
 
 
+const PARENT_TOKEN = parentTokenFromPath(location.pathname);
 let state = {
   view: 'boot', authTab: 'login', theme: localStorage.getItem('theme') || 'light',
   firebaseUser: null, role: null, userDoc: null,
@@ -78,6 +90,10 @@ let state = {
   allStudentsAdmin: [],
   studentQuery: '', studentSort: 'nameAsc', teacherQuery: '',
   groupTab: 'journal', journalMonth: '', journalExtra: {},
+  jSel: null,
+  jShowQ: (() => { try { return localStorage.getItem('jShowQ') === '1'; } catch (e) { return false; } })(),
+  parentMode: !!PARENT_TOKEN, parentView: { status: 'loading', data: null },
+  parentLinks: [], parentLinksFor: null,
 };
 
 let unsubTeachers = null, unsubGroups = null, unsubStudents = null, unsubNotifications = null, unsubSubscription = null, unsubAds = null, unsubUserDoc = null;
@@ -91,6 +107,7 @@ function resetSessionState() {
   state.notifications = []; state.ads = []; state.groupDocs = []; state.attendance = []; state.workPlan = [];
   state.allGroupsAdmin = []; state.allStudentsAdmin = []; state.modal = null; state.adDismissed = false;
   state.groupTab = 'journal'; state.journalMonth = ''; state.journalExtra = {};
+  state.jSel = null; state.parentLinks = []; state.parentLinksFor = null;
 }
 
 /** Admin statistikasi uchun guruh va o'quvchilarni BIR MARTA o'qiydi (real-vaqtli tinglovchi o'rniga).
@@ -128,39 +145,11 @@ async function backfillDirectoryOnce(list) {
 }
 const uid = () => 'x' + Math.random().toString(36).slice(2, 9);
 
-function esc(s) { return (s ?? '').toString().replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
 /* ---------- XAVFSIZLIK YORDAMCHILARI ----------
    Firestore'dan kelgan HAR QANDAY qiymat (rasm, fayl, havola, baho) HTML'ga qo'yilishidan oldin
    shulardan o'tishi kerak. Avval proofDocs/photo/fileData/ad.link/grade.value tekshirilmasdan
    qo'yilardi: zararli foydalanuvchi atribut ichiga kod yozib, admin brauzerida ishlatishi mumkin edi. */
-function num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
-/** Faqat data:image/... ko'rinishidagi rasm; aks holda bo'sh satr. */
-function safeImgSrc(v) {
-  return (typeof v === 'string' && /^data:image\/(png|jpe?g|webp|gif);base64,/.test(v)) ? esc(v) : '';
-}
-/** Yuklab olinadigan hujjat uchun faqat data: havola (HTML/JS turlari emas). */
-function safeFileHref(v) {
-  return (typeof v === 'string' && /^data:(application\/(pdf|msword|octet-stream|vnd\.openxmlformats-officedocument\.wordprocessingml\.document)|image\/(png|jpe?g));base64,/i.test(v)) ? esc(v) : '#';
-}
-/** Faqat http/https havolalar (javascript: va boshqalarni o'tkazmaydi). */
-function safeHttpUrl(u) {
-  try {
-    const x = new URL(String(u || ''), location.origin);
-    return /^https?:$/.test(x.protocol) ? x.href : '#';
-  } catch (e) { return '#'; }
-}
-/** Mahalliy (UTC emas!) sana: YYYY-MM-DD. toISOString() Toshkentda 00:00-05:00 oralig'ida kechagi sanani berardi. */
-function localDateStr(d) {
-  d = d || new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-/** Joriy o'quv yili (1-sentabrdan 31-avgustgacha) chegaralari, millisekundda. */
-function academicYearRange() {
-  const now = new Date();
-  const y = now.getMonth() >= 8 ? now.getFullYear() : now.getFullYear() - 1;
-  return { start: new Date(y, 8, 1).getTime(), end: new Date(y + 1, 8, 1).getTime() };
-}
 
 function friendlyError(err) {
   const code = err?.code || '';
@@ -207,6 +196,7 @@ window.addEventListener('appinstalled', () => { deferredInstallPrompt = null; re
 
 let authRun = 0;
 watchAuth(async (user) => {
+  if (state.parentMode) return; // ota-ona sahifasida kirish/profil yuklanmaydi
   const run = ++authRun;
   const stale = () => run !== authRun;
   state.firebaseUser = user;
@@ -332,6 +322,7 @@ function loadGroupExtrasOnce() {
 function syncActiveGroup() {
   if (state.activeGroupId === syncedGroupId) return;
   syncedGroupId = state.activeGroupId;
+  state.jSel = null; state.parentLinks = []; state.parentLinksFor = null;
   subscribeStudentsIfNeeded();
   loadGroupExtrasOnce();
 }
@@ -349,9 +340,12 @@ function captureFormState() {
   const ae = document.activeElement;
   const active = ae && ae.id && snap[ae.id]
     ? { id: ae.id, start: ae.selectionStart ?? null, end: ae.selectionEnd ?? null } : null;
-  return { snap, active };
+  const jw = document.querySelector('.jwrap');
+  const scroll = jw ? { l: jw.scrollLeft, t: jw.scrollTop } : null;
+  return { snap, active, scroll };
 }
-function restoreFormState({ snap, active }) {
+function restoreFormState({ snap, active, scroll }) {
+  if (scroll) { const jw = document.querySelector('.jwrap'); if (jw) { jw.scrollLeft = scroll.l; jw.scrollTop = scroll.t; } }
   for (const id in snap) {
     const el = document.getElementById(id);
     if (!el || el.type === 'file') continue;
@@ -374,6 +368,12 @@ function render() {
 function renderInner() {
   const app = document.getElementById('app');
   document.body.classList.toggle('dark', state.theme === 'dark');
+
+  if (state.parentMode) {
+    app.innerHTML = `${langSwitcherHTML(true)}${parentPageHTML(state.parentView, { t, lang: getLang() })}${renderToast()}`;
+    attachHandlers();
+    return;
+  }
 
   if (state.view === 'boot') { app.innerHTML = `<div class="spinner"></div>`; return; }
 
@@ -435,7 +435,6 @@ function getSubStatus() {
   if (Date.now() <= expiresAtMs) return { plan, state: 'active', expiresAtMs, daysLeft: daysBetween(localDateStr(), ymdOf(new Date(expiresAtMs))) };
   return { plan, state: 'expired', expiresAtMs };
 }
-function ymdOf(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
 /** Email/parol bilan ro'yxatdan o'tgan va emailini hali tasdiqlamagan o'qituvchiga eslatma. */
 function emailVerifyBannerHTML() {
   const u = state.firebaseUser;
@@ -1027,8 +1026,6 @@ function findGrade(s, ref) {
   if (!ref) return null;
   return (s.grades || []).find(g => g.date === ref.date && g.subject === ref.subject && num(g.value) === ref.value) || null;
 }
-function validGradeValues(s) { return (s.grades || []).map(g => num(g.value)).filter(v => v >= 1 && v <= 5); }
-function studentAvg(s) { const v = validGradeValues(s); if (!v.length) return 0; return v.reduce((a, b) => a + b, 0) / v.length; }
 function studentAttendancePercent(studentId) {
   if (!state.attendance.length) return null;
   // Yangi o'quv yili boshlangan bo'lsa, foiz faqat shu sanadan keyingi darslardan hisoblanadi.
@@ -1057,46 +1054,7 @@ function levelLabel(avg) {
    O'quvchida: payDue — keyingi to'lov muddati, payDay — har oyning to'lov kuni, paidThrough — oxirgi
    to'langan muddat, payHistory — to'lovlar tarixi. "To'ladi" bosilganda paidThrough = payDue bo'ladi
    va payDue bir oyga suriladi. Shu tufayli holat har doim sanadan hisoblanadi (qo'shimcha yangilash kerak emas). */
-const PAY_WARN_DAYS = 3;
-const pad2 = (n) => String(n).padStart(2, '0');
-function parseYMD(str) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(str || ''));
-  return m ? { y: +m[1], m: +m[2], d: +m[3] } : null;
-}
-function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
-function daysBetween(fromStr, toStr) {
-  const a = parseYMD(fromStr), b = parseYMD(toStr);
-  if (!a || !b) return null;
-  return Math.round((Date.UTC(b.y, b.m - 1, b.d) - Date.UTC(a.y, a.m - 1, a.d)) / 86400000);
-}
-/** Sanani bir oyga suradi, oyning kuni (day) saqlanadi (qisqa oyda oxirgi kunga tushadi). */
-function addMonthKeepDay(dateStr, day) {
-  const p = parseYMD(dateStr);
-  if (!p) return '';
-  let y = p.y, m = p.m + 1;
-  if (m > 12) { m = 1; y++; }
-  return `${y}-${pad2(m)}-${pad2(Math.min(day || p.d, daysInMonth(y, m)))}`;
-}
-/** Bugundan boshlab eng yaqin to'lov kuni (bugun ham hisoblanadi). */
-function nextDueFromDay(payDay, todayStr) {
-  const t0 = parseYMD(todayStr || localDateStr());
-  const cand = Math.min(payDay, daysInMonth(t0.y, t0.m));
-  if (cand >= t0.d) return `${t0.y}-${pad2(t0.m)}-${pad2(cand)}`;
-  return addMonthKeepDay(`${t0.y}-${pad2(t0.m)}-${pad2(t0.d)}`, payDay);
-}
-function validPayDay(v) { const n = Number(v); return Number.isInteger(n) && n >= 1 && n <= 31 ? n : null; }
-function fmtDMY(str) { const p = parseYMD(str); return p ? `${pad2(p.d)}.${pad2(p.m)}.${p.y}` : ''; }
-function fmtMoney(n) { return Number(n || 0).toLocaleString('ru-RU'); }
 
-function payStatus(s) {
-  if (!parseYMD(s.payDue)) return { kind: 'none' };
-  const today = localDateStr();
-  if (parseYMD(s.paidThrough) && s.paidThrough >= today) return { kind: 'paid', until: s.paidThrough };
-  const days = daysBetween(today, s.payDue);
-  if (days < 0) return { kind: 'overdue', days: -days };
-  if (days <= PAY_WARN_DAYS) return { kind: 'soon', days };
-  return { kind: 'ok', days };
-}
 function payText(st) {
   if (st.kind === 'paid') return t('payStatusPaid', { date: fmtDMY(st.until) });
   if (st.kind === 'overdue') return t('payStatusOverdue', { n: st.days });
@@ -1209,29 +1167,12 @@ function renderPayBanner(students) {
    Guruhning dars kunlari (group.weekdays: 1=dushanba ... 7=yakshanba) bo'yicha tanlangan oyning sanalari ustun bo'ladi.
    Baho shu sanaga qo'yiladi: grade.day = "YYYY-MM-DD". Eski baholarda (day yo'q) sana qo'yilgan vaqtidan olinadi,
    shuning uchun hech qaysi baho yo'qolmaydi. */
-const DATE_STR_RE = /^\d{4}-\d{2}-\d{2}$/;
-function isoWeekday(y, m, d) { const w = new Date(y, m - 1, d).getDay(); return w === 0 ? 7 : w; }
-function gradeDay(g) { return DATE_STR_RE.test(g.day || '') ? g.day : ymdOf(new Date(num(g.date))); }
 function journalMonthKey() { return /^\d{4}-(0[1-9]|1[0-2])$/.test(state.journalMonth || '') ? state.journalMonth : localDateStr().slice(0, 7); }
 function journalMonthTitle(month) {
   const [y, m] = month.split('-').map(Number);
   return `${(MONTHS_FULL[getLang()] || MONTHS_FULL.uz)[m - 1]} ${y}`;
 }
-/** Jurnal ustunlari: dars kunlari + (dars kuni bo'lmasa ham) baho qo'yilgan yoki qo'lda qo'shilgan sanalar. */
-function journalColumns(group, students, month) {
-  const [y, m] = month.split('-').map(Number);
-  const wds = Array.isArray(group.weekdays) ? group.weekdays : [];
-  const regular = new Set();
-  for (let d = 1; d <= daysInMonth(y, m); d++) {
-    if (wds.includes(isoWeekday(y, m, d))) regular.add(`${y}-${pad2(m)}-${pad2(d)}`);
-  }
-  const extra = new Set();
-  students.forEach(s => (s.grades || []).forEach(g => { const dd = gradeDay(g); if (dd.startsWith(month) && !regular.has(dd)) extra.add(dd); }));
-  ((state.journalExtra || {})[group.id] || []).forEach(dd => { if (dd.startsWith(month) && !regular.has(dd)) extra.add(dd); });
-  return [...regular].map(day => ({ day, extra: false }))
-    .concat([...extra].map(day => ({ day, extra: true })))
-    .sort((a, b) => a.day.localeCompare(b.day));
-}
+function journalColumns(group, students, month) { return buildJournalColumns(group, students, month, (state.journalExtra || {})[group.id] || []); }
 /** "5 — A'lo" kabi nomdan raqam qismini olib tashlaydi (raqam alohida katta ko'rsatiladi). */
 const gradeWord = (key) => t(key).replace(/^\d\s*[\u2014\u2013-]\s*/, '');
 function attendanceOn(day) { return state.attendance.find(a => a.date === day) || null; }
@@ -1249,6 +1190,19 @@ function renderJournal(group, students, shown, locked, isOwner) {
   const cols = journalColumns(group, students, month);
   const today = localDateStr();
   const att = {}; cols.forEach(c => { att[c.day] = attendanceOn(c.day); });
+  const showQ = !!state.jShowQ;
+  const curQ = quarterOfMonth('m' + (Number(month.slice(5, 7)) - 1));
+  const qHead = showQ ? `<th class="jq jqhead">${t('jqMonthAvg')}</th>${[1, 2, 3, 4].map(n => `<th class="jq jqhead ${curQ === n ? 'curq' : ''}">${t('jqShort' + n)}</th>`).join('')}<th class="jq jqhead">${t('jqYearShort')}</th>` : '';
+  const qCell = (s, key, n) => {
+    const c = quarterSummary(s)[key];
+    const inner = c.manual ? `<span class="grade ${gradeClass(c.manual)} jqm">${c.manual}</span>` : c.auto !== null ? `<span class="jqa">${c.auto.toFixed(1)}</span>` : '<span class="muted">\u2014</span>';
+    return `<td class="jq ${n && curQ === n ? 'curq' : ''} ${locked ? 'ro' : ''}" ${locked ? '' : `data-qcell="${s.id}" data-qkey="${key}" role="button" tabindex="0" title="${t('jqCellTitle')}"`}>${inner}</td>`;
+  };
+  const qBody = (s) => {
+    if (!showQ) return '';
+    const ma = monthAverage(s, month);
+    return `<td class="jq jqavg">${ma === null ? '<span class="muted">\u2014</span>' : `<b>${ma.toFixed(1)}</b>`}</td>${qCell(s, 'q1', 1)}${qCell(s, 'q2', 2)}${qCell(s, 'q3', 3)}${qCell(s, 'q4', 4)}${qCell(s, 'year', 0)}`;
+  };
   const gradeLbl = [['5', 'gradeExcellent'], ['4', 'gradeGood'], ['3', 'gradeSatisfactory'], ['2', 'gradeUnsatisfactory']];
   return `<div class="jtoolbar no-print">
       <div class="jnav">
@@ -1260,6 +1214,7 @@ function renderJournal(group, students, shown, locked, isOwner) {
       <div class="jactions">
         ${isOwner ? `<button class="btn btn-outline" id="jDaysBtn">${t('journalDaysBtn')}</button>` : ''}
         ${locked ? '' : `<button class="btn btn-outline" id="jAddDateBtn">${t('journalAddDateBtn')}</button>`}
+        <button class="btn btn-outline ${state.jShowQ ? 'on' : ''}" id="jQToggle" aria-pressed="${state.jShowQ}" title="${t('jQToggleTitle')}">${t('jQToggle')}</button>
         <button class="btn btn-outline" id="jPrintBtn">${t('journalPrintBtn')}</button>
       </div>
     </div>
@@ -1267,7 +1222,7 @@ function renderJournal(group, students, shown, locked, isOwner) {
     ${cols.length === 0 ? `<div class="empty">${t('journalMonthEmpty')}</div>` : shown.length === 0 ? `<div class="empty">${t('noSearchResults')}</div>` : `
     <div class="jwrap"><table class="journal"><thead><tr>
       <th class="jn">${t('colNum')}</th><th class="jf">${t('colFullName')}</th>
-      ${cols.map(c => { const p = dayParts(c.day); return `<th class="${c.day === today ? 'today' : ''} ${c.extra ? 'extra' : ''}"><button class="jdate" data-jdatehead="${c.day}" title="${t('attendanceBtn')}"><span class="wd">${p.wd}</span><span class="dn">${p.dn}</span></button></th>`; }).join('')}
+      ${cols.map(c => { const p = dayParts(c.day); return `<th class="${c.day === today ? 'today' : ''} ${c.extra ? 'extra' : ''}"><button class="jdate" data-jdatehead="${c.day}" title="${t('attendanceBtn')}"><span class="wd">${p.wd}</span><span class="dn">${p.dn}</span></button></th>`; }).join('')}${qHead}
     </tr></thead><tbody>
     ${shown.map((s, i) => `<tr>
       <td class="jn">${i + 1}</td>
@@ -1278,8 +1233,8 @@ function renderJournal(group, students, shown, locked, isOwner) {
         const inner = gs.length
           ? gs.map(g => `<span class="grade ${gradeClass(num(g.value))}">${num(g.value)}</span>`).join('') + (abs ? '<i class="jabs-dot"></i>' : '')
           : (abs ? `<span class="jabs">${t('journalAbsentMark')}</span>` : '');
-        return `<td class="jcell ${c.day === today ? 'today' : ''} ${locked ? 'ro' : ''}" ${locked ? '' : `data-jcell="${s.id}" data-jday="${c.day}" role="button" tabindex="0"`}>${inner}</td>`;
-      }).join('')}
+        return `<td class="jcell ${c.day === today ? 'today' : ''} ${locked ? 'ro' : ''} ${state.jSel && state.jSel.studentId === s.id && state.jSel.day === c.day ? 'sel' : ''}" ${locked ? '' : `data-jcell="${s.id}" data-jday="${c.day}" role="button" tabindex="0"`}>${inner}</td>`;
+      }).join('')}${qBody(s)}
     </tr>`).join('')}
     </tbody></table></div>
     <div class="jlegend no-print">
@@ -1287,7 +1242,9 @@ function renderJournal(group, students, shown, locked, isOwner) {
       <span class="i">${t('journalLegendAbsent', { mark: `<span class="jabs" style="margin-right:4px;">${t('journalAbsentMark')}</span>` })}</span>
       <span class="i"><b style="color:var(--gold);margin-right:4px;">*</b>${t('journalLegendExtra')}</span>
     </div>
-    <div class="muted no-print" style="font-size:12px;margin-top:6px;">${t('journalLegendHint')}</div>`}`;
+    <div class="muted no-print" style="font-size:12px;margin-top:6px;">${t('journalLegendHint')}</div>
+    ${showQ ? `<div class="muted no-print" style="font-size:12px;margin-top:4px;">${t('jqLegend')}</div>` : ''}
+    ${locked ? '' : `<div class="muted no-print jkeyhint">${t('jKeyHint')}</div>`}`}`;
 }
 
 function renderStats(group, students, shown, locked) {
@@ -1313,16 +1270,37 @@ function renderStats(group, students, shown, locked) {
         <td style="white-space:nowrap;">
           <button type="button" data-paystudent="${s.id}" ${locked ? 'disabled' : ''} style="border:none;border-radius:14px;padding:3px 9px;font-size:11.5px;font-weight:700;cursor:pointer;${payStyle(ps.kind)}">${esc(payText(ps))}</button>
           ${ps.kind === 'ok' || ps.kind === 'soon' || ps.kind === 'overdue' ? `<button class="link-btn no-print" data-quickpay="${s.id}" title="${t('payQuickTitle')}" style="margin-left:4px;font-size:15px;" ${locked ? 'disabled' : ''}>\u2713</button>` : ''}
+          ${ps.kind === 'overdue' || ps.kind === 'soon' ? `<button class="link-btn no-print" data-remind="${s.id}" title="${esc(t('remindTitle', { name: s.fullName }))}" style="margin-left:6px;font-size:12px;font-weight:700;">${t('remindBtn')}</button>` : ''}
         </td>
         <td class="no-print" style="white-space:nowrap;">
           <button class="link-btn" data-editstudent="${s.id}" ${locked ? 'disabled' : ''}>${t('editLink')}</button>
+          <button class="link-btn" data-parentlink="${s.id}" style="margin-left:8px;" ${locked ? 'disabled' : ''}>${t('parentBtn')}</button>
           ${Array.isArray(s.archive) && s.archive.length ? `<button class="link-btn" data-archive="${s.id}" style="margin-left:8px;">\u{1F4DA} ${t('archiveLink')}</button>` : ''}
           <button class="link-btn" data-delstudent="${s.id}" style="color:var(--danger);margin-left:8px;" ${locked ? 'disabled' : ''}>${t('deleteLink')}</button></td>
       </tr>`;
     }).join('')}
     </tbody></table></div>`}
+    ${renderCharts(group, students)}
     <div class="divider"></div>
     <div class="muted">${t('groupAvgLabel')} <b style="color:var(--navy)">${avg.toFixed(2)}</b> / 5.00 &nbsp;\u00B7&nbsp; ${t('groupProgressLabel')} <b style="color:var(--teal)">${withGrades.length ? Math.round(withGrades.filter(s => studentAvg(s) >= 3).length / withGrades.length * 100) : 0}%</b></div>`;
+}
+
+/** Ko'rsatkichlar bo'limi grafiklari: guruh o'rtachasi, davomat dinamikasi, eng ko'p o'sganlar. */
+function renderCharts(group, students) {
+  if (!students.length) return '';
+  const lang = getLang();
+  const lab = (key) => `${monthShort(lang, Number(key.slice(5, 7)) - 1)} ${key.slice(2, 4)}`;
+  const avgPts = monthlyGroupAverages(students).map(p => ({ label: lab(p.key), value: p.value }));
+  const attPts = attendanceMonthly(state.attendance, students.map(s => s.id), group.yearStart || '').map(p => ({ label: lab(p.key), value: p.value }));
+  const grow = topGrowers(students, 5);
+  const empty = `<div class="muted" style="font-size:13px;">${t('chartNoData')}</div>`;
+  return `<div class="divider"></div>
+    <h3 style="margin:0 0 10px;" class="no-print">${t('chartsTitle')}</h3>
+    <div class="charts-grid no-print">
+      <div class="chart-card"><h4>${t('chartGroupAvg')}</h4>${avgPts.length ? lineChartSVG({ points: avgPts, yMin: 1, yMax: 5, ticks: [1, 2, 3, 4, 5], decimals: 1, label: t('chartGroupAvg') }) : empty}</div>
+      <div class="chart-card"><h4>${t('chartAttendance')}</h4>${attPts.length ? lineChartSVG({ points: attPts, yMin: 0, yMax: 100, ticks: [0, 25, 50, 75, 100], decimals: 0, suffix: '%', color: 'var(--gold)', label: t('chartAttendance') }) : empty}</div>
+      <div class="chart-card"><h4>${t('chartTopGrowers')}</h4>${grow.length ? `<ol class="grow-list">${grow.map(r => `<li><span class="gname">${esc(r.student.fullName)}</span><span class="gdelta">+${r.delta.toFixed(1)}</span><span class="muted grange">${esc(t('chartGrowRange', { from: r.from.toFixed(1), to: r.to.toFixed(1) }))}</span></li>`).join('')}</ol>` : `<div class="muted" style="font-size:13px;">${t('chartGrowersEmpty')}</div>`}</div>
+    </div>`;
 }
 
 function renderGroupPanel(group) {
@@ -1365,6 +1343,64 @@ function renderGroupPanel(group) {
 function renderModal() {
   if (!state.modal) return '';
   const m = state.modal;
+  if (m.type === 'qGrade') {
+    const st = state.students.find(x => x.id === m.studentId);
+    if (!st) return '';
+    const c = quarterSummary(st)[m.key] || { manual: null, auto: null };
+    const names = { q1: t('q1'), q2: t('q2'), q3: t('q3'), q4: t('q4'), year: t('qYear') };
+    const lbl = { 5: 'gradeExcellent', 4: 'gradeGood', 3: 'gradeSatisfactory', 2: 'gradeUnsatisfactory' };
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:420px;">
+      <h2 style="font-size:18px;">${t('qGradeTitle', { name: esc(st.fullName), period: esc(names[m.key] || '') })}</h2>
+      <div class="muted" style="font-size:13px;margin:6px 0;">${c.auto === null ? t('qGradeNoAuto') : t('qGradeAuto', { avg: c.auto.toFixed(2) })}</div>
+      <div class="jvalues">${[5, 4, 3, 2].map(n => `<button class="jvalue g${n} ${c.manual === n ? 'cur' : ''}" data-qvalue="${n}"><b>${n}</b><span>${gradeWord(lbl[n])}</span></button>`).join('')}</div>
+      ${c.manual ? `<button class="btn btn-outline block" id="qClear" style="margin-top:10px;">${t('qGradeClear')}</button>` : ''}
+      <div class="muted" style="font-size:12px;margin-top:8px;">${t('qGradeHint')}</div>
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:14px;">${t('mClose')}</button>
+    </div></div>`;
+  }
+  if (m.type === 'payRemind') {
+    const st = state.students.find(x => x.id === m.studentId);
+    if (!st) return '';
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:480px;">
+      <h2 style="font-size:18px;">${t('remindTitle', { name: esc(st.fullName) })}</h2>
+      <label>${t('remindLang')}</label>
+      <select id="prLang">${LANGS.map(l => `<option value="${l.code}" ${m.lang === l.code ? 'selected' : ''}>${esc(l.label)}</option>`).join('')}</select>
+      <label>${t('remindText')}</label>
+      <textarea id="prText" rows="7">${esc(m.text)}</textarea>
+      <div class="muted" style="font-size:12px;margin-top:6px;">${t('remindHint')}</div>
+      <div class="remind-actions">
+        <button class="btn btn-outline" id="prCopy">${t('remindCopy')}</button>
+        <button class="btn btn-teal" id="prTelegram">${t('remindTelegram')}</button>
+        <button class="btn btn-outline" id="prSms">${t('remindSms')}</button>
+      </div>
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:12px;">${t('mClose')}</button>
+    </div></div>`;
+  }
+  if (m.type === 'parentLink') {
+    const st = state.students.find(x => x.id === m.studentId);
+    if (!st) return '';
+    const loading = state.parentLinksFor !== st.groupId;
+    const link = state.parentLinks.find(l => l.studentId === st.id);
+    const synced = link?.updatedAt?.toMillis ? fmtDMY(localDateStr(new Date(link.updatedAt.toMillis()))) : t('justNow');
+    return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:480px;">
+      <h2 style="font-size:18px;">${t('parentTitle', { name: esc(st.fullName) })}</h2>
+      <div class="muted" style="font-size:13px;">${t('parentIntro')}</div>
+      <div class="info-box" style="margin:10px 0;font-size:12.5px;">${t('parentVisible')}</div>
+      ${loading ? `<div class="muted">${t('parentLoadingLinks')}</div>` : link ? `
+        <input type="text" id="plUrl" readonly value="${esc(parentUrl(location.origin, link.token))}">
+        <div class="muted" style="font-size:12px;margin-top:4px;">${t('parentLastSync', { date: esc(synced) })}</div>
+        <div class="remind-actions">
+          <button class="btn btn-outline" id="plCopy">${t('parentCopy')}</button>
+          <button class="btn btn-teal" id="plShare">${t('parentShare')}</button>
+        </div>
+        <div class="remind-actions">
+          <button class="btn btn-outline" id="plRefresh">${t('parentRefresh')}</button>
+          <button class="btn btn-danger" id="plDelete">${t('parentDelete')}</button>
+        </div>` : `<button class="btn btn-teal block" id="plCreate">${t('parentCreate')}</button>`}
+      <div class="muted" style="font-size:12px;margin-top:10px;">${t('parentWarn')}</div>
+      <button class="btn btn-outline block" id="modalCancel" style="margin-top:12px;">${t('mClose')}</button>
+    </div></div>`;
+  }
   if (m.type === 'journalCell') {
     const st = state.students.find(x => x.id === m.studentId);
     if (!st) return '';
@@ -1497,7 +1533,8 @@ function renderModal() {
     const hist = (Array.isArray(s.payHistory) ? s.payHistory : []).slice().reverse().slice(0, 12);
     return `<div class="modal-bg" id="modalBg"><div class="modal" style="max-width:460px;">
       <h2>${t('payStudentTitle', { name: esc(s.fullName) })}</h2>
-      <div style="margin:6px 0 4px;"><span style="display:inline-block;border-radius:14px;padding:3px 10px;font-size:12px;font-weight:700;${payStyle(ps.kind)}">${esc(payText(ps))}</span></div>
+      <div style="margin:6px 0 4px;"><span style="display:inline-block;border-radius:14px;padding:3px 10px;font-size:12px;font-weight:700;${payStyle(ps.kind)}">${esc(payText(ps))}</span>
+        ${ps.kind === 'overdue' || ps.kind === 'soon' ? `<button class="link-btn" data-remind="${s.id}" style="margin-left:8px;font-size:12.5px;font-weight:700;">${t('remindBtn')}</button>` : ''}</div>
       <label>${t('payDueLabel')}</label><input type="date" id="spDue" value="${esc(s.payDue || '')}">
       <button class="btn btn-outline block" id="spSaveDue" style="margin-top:8px;">${t('payDueSave')}</button>
       <div class="divider"></div>
@@ -1597,6 +1634,7 @@ function renderModal() {
         <button class="btn btn-outline block" id="openCoTeacherBtn">${t('coTeacherBtn')}</button>
         <button class="btn btn-outline block" id="openEditGroupBtn">${t('editGroupBtn')}</button>
         <button class="btn btn-outline block" id="openNewYearBtn">${t('newYearBtn')}</button>
+        <button class="btn btn-outline block" id="openSyncParentLinksBtn">${t('parentSyncAll')}</button>
         <button class="btn btn-danger block" id="openDeleteGroupBtn">${t('deleteGroupBtn')}</button>
       </div>
       <button class="btn btn-outline block" id="modalCancel" style="margin-top:16px;">${t('mClose')}</button>
@@ -1810,19 +1848,6 @@ function renderModal() {
   return '';
 }
 
-const MONTHS_FULL = {
-  uz: ['Yanvar', 'Fevral', 'Mart', 'Aprel', 'May', 'Iyun', 'Iyul', 'Avgust', 'Sentabr', 'Oktabr', 'Noyabr', 'Dekabr'],
-  ru: ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'],
-  en: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
-};
-/** Saqlangan davrni (yangi: "m3", eski: "Aprel" / "April" / "Апрель") oy raqamiga (0-11) o'giradi; topilmasa -1. */
-function monthIndexOf(p) {
-  const v = String(p ?? '');
-  const m = /^m(\d{1,2})$/.exec(v);
-  if (m) return Number(m[1]) <= 11 ? Number(m[1]) : -1;
-  for (const lang in MONTHS_FULL) { const i = MONTHS_FULL[lang].indexOf(v); if (i >= 0) return i; }
-  return -1;
-}
 /** Saqlangan davrni joriy tildagi oy nomiga o'giradi (noma'lum bo'lsa — o'zini qaytaradi). */
 function periodLabel(p) {
   const i = monthIndexOf(p);
@@ -1837,27 +1862,6 @@ function monthOptionsHTML(selected, withEmpty) {
     + arr.map((name, i) => `<option value="m${i}" ${i === sel ? 'selected' : ''}>${name}</option>`).join('');
 }
 
-function quarterOfMonth(monthName) {
-  const mm = /^m(\d{1,2})$/.exec(String(monthName ?? ''));
-  if (mm) {
-    const mi = Number(mm[1]);
-    if (mi > 11) return null;
-    if ([8, 9, 10].includes(mi)) return 1;
-    if ([11, 0, 1].includes(mi)) return 2;
-    if ([2, 3, 4].includes(mi)) return 3;
-    return 4;
-  }
-  const idx = { Yanvar: 0, Fevral: 1, Mart: 2, Aprel: 3, May: 4, Iyun: 5, Iyul: 6, Avgust: 7, Sentabr: 8, Oktabr: 9, Noyabr: 10, Dekabr: 11,
-    '\u042f\u043d\u0432\u0430\u0440\u044c': 0, '\u0424\u0435\u0432\u0440\u0430\u043b\u044c': 1, '\u041c\u0430\u0440\u0442': 2, '\u0410\u043f\u0440\u0435\u043b\u044c': 3, '\u041c\u0430\u0439': 4, '\u0418\u044e\u043d\u044c': 5, '\u0418\u044e\u043b\u044c': 6, '\u0410\u0432\u0433\u0443\u0441\u0442': 7, '\u0421\u0435\u043d\u0442\u044f\u0431\u0440\u044c': 8, '\u041e\u043a\u0442\u044f\u0431\u0440\u044c': 9, '\u041d\u043e\u044f\u0431\u0440\u044c': 10, '\u0414\u0435\u043a\u0430\u0431\u0440\u044c': 11,
-    January: 0, February: 1, March: 2, April: 3, June: 5, July: 6, August: 7, September: 8, October: 9, November: 10, December: 11 };
-  const m = idx[monthName];
-  if (m === undefined) return null;
-  // O'quv yili: Sen-Noy=1chorak, Dek-Fev=2, Mar-May=3, Iyun-Avg=4
-  if ([8, 9, 10].includes(m)) return 1;
-  if ([11, 0, 1].includes(m)) return 2;
-  if ([2, 3, 4].includes(m)) return 3;
-  return 4;
-}
 
 function renderQuarterlyContent(groupId) {
   const students = state.students.filter(s => s.groupId === groupId);
@@ -2202,8 +2206,130 @@ function attachHandlers() {
   }));
   document.querySelectorAll('[data-jcell]').forEach(el => {
     const open = () => { state.modal = { type: 'journalCell', studentId: el.dataset.jcell, day: el.dataset.jday }; render(); };
+    // Sichqonchada: bosish — tanlash, ikki marta bosish — oyna. Sensorli ekranda: bosish — oyna (avvalgidek).
+    el.addEventListener('click', () => { if (isCoarsePointer()) open(); else setJournalSel({ studentId: el.dataset.jcell, day: el.dataset.jday }, false); });
+    el.addEventListener('dblclick', open);
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); open(); } });
+  });
+  document.getElementById('jQToggle')?.addEventListener('click', () => {
+    state.jShowQ = !state.jShowQ;
+    try { localStorage.setItem('jShowQ', state.jShowQ ? '1' : '0'); } catch (e) { /* xotira yopiq bo'lishi mumkin */ }
+    render();
+  });
+  document.querySelectorAll('[data-qcell]').forEach(el => {
+    const open = () => { state.modal = { type: 'qGrade', studentId: el.dataset.qcell, key: el.dataset.qkey }; render(); };
     el.addEventListener('click', open);
     el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+  });
+  document.querySelectorAll('[data-qvalue]').forEach(el => el.addEventListener('click', async () => {
+    try {
+      await setStudentQGrade(state.modal.studentId, state.modal.key, parseInt(el.dataset.qvalue));
+      toast(t('qGradeSaved'), 'info'); state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  }));
+  document.getElementById('qClear')?.addEventListener('click', async () => {
+    try {
+      await setStudentQGrade(state.modal.studentId, state.modal.key, null);
+      toast(t('qGradeCleared'), 'info'); state.modal = null; render();
+    } catch (err) { toast(friendlyError(err), 'error'); }
+  });
+
+  /* To'lov eslatmasi */
+  document.querySelectorAll('[data-remind]').forEach(el => el.addEventListener('click', () => {
+    const st = state.students.find(x => x.id === el.dataset.remind);
+    if (!st) return;
+    const group = state.groups.find(g => g.id === st.groupId);
+    const lang = getLang();
+    const text = reminderText({ lang, student: st, group, teacherName: state.userDoc?.fullName || '' });
+    if (!text) { toast(t('remindNoDue'), 'error'); return; }
+    state.modal = { type: 'payRemind', studentId: st.id, lang, text }; render();
+  }));
+  document.getElementById('prLang')?.addEventListener('change', (e) => {
+    const st = state.students.find(x => x.id === state.modal.studentId);
+    if (!st) return;
+    const group = state.groups.find(g => g.id === st.groupId);
+    const text = reminderText({ lang: e.target.value, student: st, group, teacherName: state.userDoc?.fullName || '' });
+    state.modal.lang = e.target.value; state.modal.text = text;
+    document.getElementById('prText').value = text; // render() chaqirilmaydi: aks holda eski matn tiklanadi
+  });
+  document.getElementById('prText')?.addEventListener('input', (e) => { state.modal.text = e.target.value; });
+  document.getElementById('prCopy')?.addEventListener('click', async () => {
+    const ok = await copyText(document.getElementById('prText').value);
+    toast(ok ? t('remindCopied') : t('errGeneric'), ok ? 'info' : 'error');
+  });
+  document.getElementById('prTelegram')?.addEventListener('click', () => {
+    window.open(telegramShareUrl(document.getElementById('prText').value), '_blank', 'noopener');
+  });
+  document.getElementById('prSms')?.addEventListener('click', () => {
+    window.location.href = smsUrl(document.getElementById('prText').value);
+  });
+
+  /* Ota-onalar uchun havola */
+  document.querySelectorAll('[data-parentlink]').forEach(el => el.addEventListener('click', async () => {
+    const st = state.students.find(x => x.id === el.dataset.parentlink);
+    if (!st) return;
+    state.parentLinksFor = null; state.parentLinks = [];
+    state.modal = { type: 'parentLink', studentId: st.id }; render();
+    try { await loadParentLinks(st.groupId); } catch (err) { toast(friendlyError(err), 'error'); }
+    render();
+  }));
+  const parentCtx = () => {
+    const st = state.students.find(x => x.id === state.modal?.studentId);
+    const group = st && state.groups.find(g => g.id === st.groupId);
+    return st && group ? { st, group, snap: buildParentSnapshot({ group, student: st, attendance: st.groupId === state.activeGroupId ? state.attendance : [] }) } : null;
+  };
+  document.getElementById('plCreate')?.addEventListener('click', async () => {
+    const c = parentCtx(); if (!c) return;
+    document.getElementById('plCreate').disabled = true;
+    try {
+      await createParentLink(state.firebaseUser.uid, newParentToken(), c.snap);
+      await loadParentLinks(c.st.groupId);
+      toast(t('parentCreated'), 'info');
+    } catch (err) { toast(friendlyError(err), 'error'); }
+    render();
+  });
+  document.getElementById('plRefresh')?.addEventListener('click', async () => {
+    const c = parentCtx(); if (!c) return;
+    const link = state.parentLinks.find(l => l.studentId === c.st.id); if (!link) return;
+    try { await updateParentLink(link.token, c.snap); await loadParentLinks(c.st.groupId); toast(t('parentRefreshed'), 'info'); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+    render();
+  });
+  document.getElementById('plDelete')?.addEventListener('click', async () => {
+    const c = parentCtx(); if (!c) return;
+    const link = state.parentLinks.find(l => l.studentId === c.st.id); if (!link) return;
+    if (!confirm(t('parentDeleteConfirm'))) return;
+    try { await deleteParentLink(link.token); state.parentLinks = state.parentLinks.filter(l => l.token !== link.token); toast(t('parentDeleted'), 'info'); }
+    catch (err) { toast(friendlyError(err), 'error'); }
+    render();
+  });
+  document.getElementById('plUrl')?.addEventListener('focus', (e) => e.target.select());
+  document.getElementById('plCopy')?.addEventListener('click', async () => {
+    const ok = await copyText(document.getElementById('plUrl').value);
+    toast(ok ? t('parentCopied') : t('errGeneric'), ok ? 'info' : 'error');
+  });
+  document.getElementById('plShare')?.addEventListener('click', () => {
+    const c = parentCtx(); if (!c) return;
+    window.open(telegramShareUrl(t('parentShareText', { name: c.st.fullName, url: document.getElementById('plUrl').value })), '_blank', 'noopener');
+  });
+  document.getElementById('openSyncParentLinksBtn')?.addEventListener('click', async () => {
+    const gid = state.activeGroupId;
+    const group = state.groups.find(g => g.id === gid);
+    if (!group) return;
+    const btn = document.getElementById('openSyncParentLinksBtn'); btn.disabled = true;
+    try {
+      const links = await getGroupParentLinks(gid);
+      let n = 0;
+      for (const l of links) {
+        const st = state.students.find(x => x.id === l.studentId);
+        if (!st) continue;
+        await updateParentLink(l.token, buildParentSnapshot({ group, student: st, attendance: state.attendance }));
+        n++;
+      }
+      toast(n ? t('parentSyncDone', { n }) : t('parentSyncNone'), 'info');
+      state.modal = null;
+    } catch (err) { toast(friendlyError(err), 'error'); }
+    render();
   });
   document.querySelectorAll('[data-jvalue]').forEach(el => el.addEventListener('click', async () => {
     const st = state.students.find(x => x.id === state.modal.studentId);
@@ -2297,7 +2423,12 @@ function attachHandlers() {
   document.querySelectorAll('[data-addgrade]').forEach(el => el.addEventListener('click', () => { state.modal = { type: 'addGrade', studentId: el.dataset.addgrade }; render(); }));
   document.querySelectorAll('[data-delstudent]').forEach(el => el.addEventListener('click', async () => {
     if (!confirm(t('confirmDeleteStudent'))) return;
-    try { await deleteStudent(el.dataset.delstudent); }
+    try {
+      const st = state.students.find(x => x.id === el.dataset.delstudent);
+      // Ommaviy ota-ona havolasi o'quvchi bilan birga o'chadi (xato bo'lsa ham o'chirish to'xtamaydi).
+      if (st) await deleteParentLinksForStudent(st.groupId, st.id).catch(e => console.error('Havolani o\u2019chirishda xato:', e));
+      await deleteStudent(el.dataset.delstudent);
+    }
     catch (err) { toast(friendlyError(err), 'error'); }
   }));
 
@@ -2930,6 +3061,13 @@ function printJournal() {
   const cols = journalColumns(group, students, month);
   const sorted = students.slice().sort((a, b) => (a.fullName || '').localeCompare(b.fullName || '', 'uz'));
   const att = {}; cols.forEach(c => { att[c.day] = attendanceOn(c.day); });
+  const showQ = !!state.jShowQ; // "Σ Choraklar" yoqilgan bo'lsa, chop etishda ham chiqadi
+  const qPrint = (s) => {
+    if (!showQ) return '';
+    const q = quarterSummary(s); const ma = monthAverage(s, month);
+    const cell = (c) => `<td class="g q">${c.manual ? `<b>${c.manual}</b>` : c.auto !== null ? c.auto.toFixed(1) : ''}</td>`;
+    return `<td class="g q">${ma === null ? '' : ma.toFixed(1)}</td>${cell(q.q1)}${cell(q.q2)}${cell(q.q3)}${cell(q.q4)}${cell(q.year)}`;
+  };
   const html = `<!doctype html><html lang="${esc(getLang())}"><head><meta charset="utf-8"><title>${esc(t('journalPrintTitle'))}</title>
 <style>
   @page { size: A4 landscape; margin: 10mm; }
@@ -2942,19 +3080,19 @@ function printJournal() {
   th { background: #e9e9e9; -webkit-print-color-adjust: exact; print-color-adjust: exact; font-size: 10px; }
   th small { display: block; font-weight: 400; font-size: 8.5px; color: #555; }
   td.n { width: 22px; } td.f { width: 150px; text-align: left; padding-left: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  td.g { font-weight: 700; font-size: 12px; height: 20px; } td.a { color: #b00; font-weight: 700; }
+  td.g { font-weight: 700; font-size: 12px; height: 20px; } td.a { color: #b00; font-weight: 700; } td.q { background: #f4f4f4; font-weight: 400; -webkit-print-color-adjust: exact; print-color-adjust: exact; } td.q b { font-weight: 800; }
   tr { page-break-inside: avoid; } thead { display: table-header-group; }
   .foot { display: flex; justify-content: space-between; margin-top: 18px; font-size: 12px; }
 </style></head><body>
 <h1>${esc(t('journalPrintTitle'))} \u2014 ${esc(journalMonthTitle(month))}</h1>
 <div class="sub">${esc(group.name)} \u00B7 ${esc(group.subject || '')} \u00B7 ${esc(t('journalTeacher'))}: ${esc(state.userDoc?.fullName || '')}</div>
 <table><thead><tr><th class="n">${esc(t('colNum'))}</th><th class="f">${esc(t('colFullName'))}</th>
-${cols.map(c => { const p = dayParts(c.day); return `<th>${p.dn}<small>${esc(p.wd)}</small></th>`; }).join('')}</tr></thead><tbody>
+${cols.map(c => { const p = dayParts(c.day); return `<th>${p.dn}<small>${esc(p.wd)}</small></th>`; }).join('')}${showQ ? `<th>${esc(t('jqMonthAvg'))}</th>${[1, 2, 3, 4].map(n => `<th>${esc(t('jqShort' + n))}</th>`).join('')}<th>${esc(t('jqYearShort'))}</th>` : ''}</tr></thead><tbody>
 ${sorted.map((s, i) => `<tr><td class="n">${i + 1}</td><td class="f">${esc(s.fullName)}</td>${cols.map(c => {
     const gs = (s.grades || []).filter(g => gradeDay(g) === c.day);
     if (gs.length) return `<td class="g">${gs.map(g => num(g.value)).join('/')}</td>`;
     return isAbsentOn(att[c.day], s.id) ? `<td class="g a">${esc(t('journalAbsentMark'))}</td>` : '<td class="g"></td>';
-  }).join('')}</tr>`).join('')}
+  }).join('')}${qPrint(s)}</tr>`).join('')}
 </tbody></table>
 <div class="foot"><span>${esc(t('journalTeacher'))}: ______________________</span><span>${esc(t('journalLegendAbsent', { mark: t('journalAbsentMark') }))}</span></div>
 </body></html>`;
@@ -3066,7 +3204,82 @@ async function exportGroupToExcel() {
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, (group.name || '').replace(/[\[\]:*?\/\\]/g, '_').slice(0, 28) || 'Sheet1');
+  // Ko'rilayotgan oyning jurnali (sanalar × o'quvchilar) alohida varaqda.
+  const jMonth = journalMonthKey();
+  const jCols = journalColumns(group, students, jMonth);
+  if (jCols.length) {
+    const attendanceByDay = {}; jCols.forEach(c => { attendanceByDay[c.day] = attendanceOn(c.day); });
+    const aoa = buildJournalSheet({
+      students, month: jMonth, cols: jCols, attendanceByDay,
+      labels: { num: t('colNum'), name: t('colFullName'), avg: t('xlsAvg'), q1: t('q1'), q2: t('q2'), q3: t('q3'), q4: t('q4'), year: t('qYear'), absent: t('journalAbsentMark'), legend: t('xlsJournalLegend') }
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), `${t('xlsSheetJournal')} ${jMonth}`.slice(0, 31));
+  }
   XLSX.writeFile(wb, `${(group.name || 'guruh').replace(/[\\/:*?"<>|]+/g, '_')}.xlsx`);
+}
+
+/* ================= Jurnal: klaviatura bilan tez baholash ================= */
+function isCoarsePointer() { return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); }
+/** Tanlangan katakni DOM'da yangilaydi (butun sahifani qayta chizmasdan — ikki marta bosish buzilmasligi uchun). */
+function setJournalSel(sel, scroll) {
+  state.jSel = sel;
+  document.querySelectorAll('td.jcell.sel').forEach(x => x.classList.remove('sel'));
+  if (!sel) return;
+  const el = [...document.querySelectorAll('td.jcell[data-jcell]')].find(x => x.dataset.jcell === sel.studentId && x.dataset.jday === sel.day);
+  if (el) { el.classList.add('sel'); if (scroll) el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
+}
+/** Yozuvlar ketma-ket bajariladi: tez-tez bosilganda bir-birini bosib ketmaydi. */
+let journalWriteQueue = Promise.resolve();
+function queueJournalWrite(fn) { journalWriteQueue = journalWriteQueue.then(fn).catch(err => toast(friendlyError(err), 'error')); }
+document.addEventListener('keydown', (e) => {
+  if (state.parentMode || state.modal || e.defaultPrevented) return;
+  const tg = e.target;
+  if (tg && (tg.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(tg.tagName))) return;
+  if (tg && /^(BUTTON|A)$/.test(tg.tagName) && (e.key === 'Enter' || e.key === ' ')) return;
+  if (!document.querySelector('table.journal')) return;
+  const group = state.groups.find(g => g.id === state.activeGroupId);
+  if (!group) return;
+  const students = state.students.filter(s => s.groupId === group.id);
+  const act = decideJournalKey(e, {
+    active: true, locked: isGroupLocked(group), sel: state.jSel, today: localDateStr(),
+    cols: journalColumns(group, students, journalMonthKey()),
+    rowIds: visibleStudents(students).map(s => s.id)
+  });
+  if (!act) return;
+  e.preventDefault();
+  if (act.type === 'select') { setJournalSel(act.sel, true); return; }
+  if (act.type === 'deselect') { setJournalSel(null); return; }
+  const { studentId, day } = state.jSel;
+  if (act.type === 'open') { state.modal = { type: 'journalCell', studentId, day }; render(); return; }
+  queueJournalWrite(async () => {
+    const st = state.students.find(x => x.id === studentId);
+    const g = state.groups.find(x => x.id === state.activeGroupId);
+    if (!st || !g) return;
+    if (act.type === 'clear') {
+      const plan = planGradeClear(st, day);
+      if (plan.op === 'remove') await setStudentGrades(st.id, st.grades.filter(x => x !== plan.target));
+      return;
+    }
+    const plan = planGradeWrite(st, day, act.value);
+    if (plan.op === 'noop') return;
+    if (plan.op === 'replace') await setStudentGrades(st.id, st.grades.map(x => x === plan.target ? { ...x, value: act.value, day } : x));
+    else await addGrade(st.id, g.subject || g.name, act.value, 'm' + (Number(day.slice(5, 7)) - 1), day);
+  });
+});
+
+/** Matnni almashish buferiga nusxalaydi (eski brauzerlar uchun zaxira usul bilan). */
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* zaxira usul */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;opacity:0;';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy'); ta.remove(); return ok;
+  } catch (e) { return false; }
+}
+async function loadParentLinks(groupId) {
+  state.parentLinks = await getGroupParentLinks(groupId);
+  state.parentLinksFor = groupId;
 }
 
 function startLockCountdownIfNeeded() {
@@ -3081,7 +3294,15 @@ function startLockCountdownIfNeeded() {
 }
 
 render();
-handleRedirectResult().catch(err => toast(friendlyError(err), 'error'));
+if (state.parentMode) {
+  // Ota-ona sahifasi: qidiruv tizimlariga ko'rsatilmaydi; faqat bitta hujjat o'qiladi.
+  const robots = document.createElement('meta'); robots.name = 'robots'; robots.content = 'noindex,nofollow'; document.head.appendChild(robots);
+  getParentLinkPublic(PARENT_TOKEN)
+    .then(d => { state.parentView = d ? { status: 'ok', data: d } : { status: 'notfound', data: null }; render(); })
+    .catch(err => { console.error(err); state.parentView = { status: err?.code === 'permission-denied' ? 'notfound' : 'error', data: null }; render(); });
+} else {
+  handleRedirectResult().catch(err => toast(friendlyError(err), 'error'));
+}
 
 /* Reklama karuseli: har 6 soniyada avtomatik almashadi. To'liq render() emas,
    faqat karusel DOM elementini yangilaydi — shu bilan boshqa joyda yozilayotgan
