@@ -16,7 +16,9 @@ reklama va bildirishnomalar. Uch tilli interfeys (uz / ru / en), tun/kun rejimi,
 | `src/main.js` | Butun interfeys va holat boshqaruvi |
 | `src/i18n.js` | Tarjimalar (uz/ru/en) va shartnoma matni |
 | `src/importParsers.js` | Excel/CSV/Word'dan o'quvchilar ro'yxatini import qilish (kutubxonalar kerak bo'lganda yuklanadi) |
+| `src/lib/*.js` | Toza mantiq (DOM va Firebase'siz, shuning uchun sinab ko'riladi): sanalar, baholar va choraklar, jurnal ustunlari va klaviatura, to'lov holati va eslatma matni, statistika, grafiklar, ota-ona havolasi |
 | `src/styles.css` | Dizayn tizimi |
+| `tests/` | Avtomatik sinovlar (`npm test`) |
 | `firestore.rules` | Xavfsizlik qoidalari — **o'zgartirgach Firebase Console → Firestore → Rules ga qo'yib "Publish" qiling** |
 | `vercel.json` | SPA yo'naltirish va xavfsizlik sarlavhalari |
 
@@ -65,6 +67,56 @@ reklama va bildirishnomalar. Uch tilli interfeys (uz / ru / en), tun/kun rejimi,
   (`day` yo'q) qo'yilgan sanasi bo'yicha ko'rinadi — dars kuni bo'lmasa, `*` belgili qo'shimcha ustunda.
 - Sana sarlavhasini bosish shu kun davomatini ochadi; davomatda kelmagan o'quvchi katakda **Y** belgisi bilan ko'rinadi.
 - **＋ Sana** dars kunidan tashqari sanani qo'shish, **🖨 Chop etish** oylik jurnalni A4 (albom) chop etish/PDF uchun.
+- **⌨ Klaviatura bilan tez baholash:** katakni bosib tanlang (sensorli ekranda bosish avvalgidek oynani ochadi),
+  keyin `↑ ↓ ← →` — yurish, `5 4 3 2` — baho, `Del`/`Backspace` — shu kundagi oxirgi bahoni o'chirish,
+  `Enter` yoki ikki marta bosish — oyna, `Esc` — tanlovni bekor qilish. Katakda bitta baho bo'lsa yangi raqam uni
+  almashtiradi; bir nechta bo'lsa yangisi qo'shiladi (oynadagi kabi). Obuna tugagan (qulflangan) guruhda faqat yurish mumkin.
+- **Σ Choraklar** tugmasi jurnalning o'ng chetiga ustunlar qo'shadi: **oy o'rtachasi**, **I–IV chorak** va **yillik**.
+  Katak ichidagi kulrang raqam — baholarning avtomatik o'rtachasi; katakni bosib **qo'lda baho** (5/4/3/2) qo'yilsa, u
+  o'rtachadan ustun turadi va qalin ko'rinadi (`students/{id}.qGrades = { q1, q2, q3, q4, year }`). Tugma holati
+  brauzerda eslab qolinadi; yoqilgan bo'lsa chop etishda ham chiqadi. Yangi o'quv yilida qo'lda baholar ham arxivga ko'chadi.
+- **Excel eksporti** (Hisobotlar → Excel) ko'rilayotgan oyning jurnalini ham alohida varaq (`Jurnal YYYY-MM`) qilib qo'shadi:
+  sanalar × o'quvchilar, kelmaganlar **Y**, oxirida oy o'rtachasi, choraklar va yillik.
+
+## Ko'rsatkichlar: grafiklar va to'lov eslatmasi
+
+- **📈 Grafiklar** (Ko'rsatkichlar bo'limi, o'quvchi jadvali ostida): guruh o'rtachasi oylar bo'yicha, davomat dinamikasi (%),
+  eng ko'p o'sgan 5 o'quvchi (birinchi va oxirgi baholangan oy o'rtachasi farqi; kamida ikki xil oyda baho kerak).
+  Grafiklar tashqi kutubxonasiz, SVG bilan chiziladi.
+- **Eslatma** tugmasi muddati o'tgan (yoki 3 kun ichida tugaydigan) o'quvchi yonida chiqadi: tayyor xabar matni
+  (uz/ru/en, tilni tanlash va matnni tahrirlash mumkin) → **Nusxalash**, **Telegram** yoki **SMS** orqali ulashish.
+  Xabar o'z-o'zidan yuborilmaydi — qabul qiluvchini o'qituvchi o'zi tanlaydi (avtomatik yuborish uchun server/Blaze reja kerak bo'ladi).
+  Ota-onaning telefon raqami saqlanmaydi.
+
+## Ota-onalar uchun faqat o'qish havolasi
+
+O'qituvchi Ko'rsatkichlar → o'quvchi qatoridagi **👪 Ota-ona** tugmasi orqali havola yaratadi: `https://<domen>/p/<kalit>`.
+Ota-ona ro'yxatdan o'tmasdan farzandining baho, davomat va chorak baholarini ko'radi.
+
+**Himoya modeli (qaror qilingan kelishuv):**
+- Havola — 192 bitli tasodifiy kalit. Kalitni bilgan kishi **faqat shu bitta** `parentLinks/{kalit}` hujjatini o'qiy oladi
+  (qoidalarda `get` ochiq, `list` faqat guruh a'zolariga). Kalitni taxmin qilib bo'lmaydi, lekin **havolani olgan har kim ko'radi** —
+  shu sabab uni faqat ota-onaga yuboring.
+- **Ko'rinadi:** ism, guruh va fan nomi, baholar (sana bilan), davomat, chorak/yillik baholar. **Ko'rinmaydi:** telefon, manzil,
+  tug'ilgan kun, rasm, to'lovlar, sinf, boshqa o'quvchilar. Hujjat qoidalar bilan ham shu maydonlarga cheklangan.
+- Ma'lumot **surat (snapshot)** sifatida yoziladi: havola yaratilganda, **🔄 Ma'lumotni yangilash** bosilganda yoki
+  Guruh sozlamalari → **Ota-ona havolalarini yangilash** (guruhdagi hammasi) bosilganda. Avtomatik yangilanmaydi
+  (har bahoda yozish Spark limitini tez sarflardi) — ota-ona ko'rayotgan ma'lumot oxirgi yangilashdagi holat.
+- O'qituvchi havolani istalgan vaqtda **o'chira oladi** (shundan so'ng ochilmaydi). O'quvchi yoki guruh o'chirilsa, havola ham o'chadi.
+  Muddat (expiry) hozircha yo'q.
+- Sahifa qidiruv tizimlariga yopiq (`noindex`, `X-Robots-Tag`), `Referrer-Policy: no-referrer`, keshlanmaydi (`vercel.json`).
+- Bolalar shaxsiy ma'lumotini ulashishdan oldin ota-onalar roziligi va amaldagi qonunchilik talablarini tekshiring.
+
+> **Qoidalarni yangilang:** `firestore.rules` da `students.qGrades` va `parentLinks` qo'shilgan. Ularni Firebase Console'da **Publish** qilmaguncha
+> chorak baholari va ota-ona havolalari `permission-denied` beradi.
+
+## Sinovlar
+
+`npm install` → `npm test` (vitest + jsdom). 100 dan ortiq sinov: sana/to'lov hisoblari, jurnal ustunlari va klaviatura mantiqi, chorak
+baholari, statistika va grafiklar, eslatma matni, Excel varag'i, tarjimalar (uz/ru/en kalitlari va `{o'rin}` belgilari mosligi),
+XSS ekranlash, ota-ona hujjatida shaxsiy ma'lumot yo'qligi, `firestore.rules` qamrovi (kod yozadigan maydonlar qoidalarda bormi)
+hamda `main.js` ni soxta Firebase bilan ishga tushirib ko'radigan interfeys sinovlari. **Qoidalarning o'zi emulyatorda sinalmagan** —
+o'zgartirgach Firebase Rules Playground yoki emulyatorda tekshiring.
 
 ## App Check yoqish (reCAPTCHA v3)
 
