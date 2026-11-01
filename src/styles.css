@@ -280,3 +280,58 @@ table.journal td.jcell .grade{width:28px; height:28px; font-size:14px; margin:0 
   .jmonth{min-width:110px; font-size:14.5px;}
   .jvalues{grid-template-columns:repeat(4,1fr);}
 }
+
+/* ================= Jurnal: klaviatura bilan tanlash va chorak/yillik ustunlar ================= */
+table.journal td.jcell{scroll-margin-left:250px; scroll-margin-top:56px; scroll-margin-right:20px; scroll-margin-bottom:20px;}
+table.journal td.jcell.sel{outline:3px solid var(--teal); outline-offset:-3px; background:rgba(46,158,143,.18);}
+table.journal td.jcell:focus-visible{outline:2px dashed var(--teal); outline-offset:-3px;}
+.jkeyhint{font-size:12px; margin-top:4px;}
+.btn.on{background:var(--teal); border-color:var(--teal); color:#fff;}
+.btn.on:hover{color:#fff; background:var(--teal-dk);}
+table.journal th.jq, table.journal td.jq{min-width:50px; padding:0 4px; font-size:12px; background:var(--paper-2);}
+table.journal th.jqhead{font-size:11px; font-weight:800; color:var(--ink-soft); padding:8px 4px; white-space:nowrap;}
+table.journal th.jqhead:first-of-type, table.journal td.jqavg{border-left:2px solid var(--teal);}
+table.journal td.jq{cursor:pointer;}
+table.journal td.jq.ro{cursor:default;}
+table.journal td.jq:hover{background:rgba(46,158,143,.16);}
+table.journal th.jq.curq{box-shadow:inset 0 -3px 0 var(--gold); color:var(--ink);}
+table.journal td.jq.curq{background:rgba(201,153,44,.10);}
+.jqa{color:var(--ink-soft); font-style:italic; font-weight:600;}
+table.journal td.jq .jqm{width:28px; height:28px; font-size:14px; font-weight:800; box-shadow:0 0 0 2px var(--gold);}
+
+/* ================= Grafiklar ================= */
+.charts-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; margin-bottom:6px;}
+.chart-card{border:1px solid var(--line); border-radius:12px; padding:12px 14px; background:var(--surface); min-width:0;}
+.chart-card h4{margin:0 0 6px; font-size:13px; color:var(--ink);}
+.chart-svg{width:100%; height:auto; display:block;}
+.grow-list{list-style:none; margin:0; padding:0;}
+.grow-list li{display:grid; grid-template-columns:1fr auto; gap:0 10px; padding:7px 0; border-bottom:1px solid var(--line); align-items:baseline;}
+.grow-list li:last-child{border-bottom:none;}
+.grow-list .gname{font-weight:700; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.grow-list .gdelta{color:var(--teal-dk); font-weight:800; font-size:14px;}
+.grow-list .grange{grid-column:1 / -1; font-size:11.5px;}
+
+/* ================= To'lov eslatmasi / ota-ona havolasi oynalari ================= */
+.modal textarea#prText{width:100%; min-height:130px; resize:vertical; font-family:inherit; font-size:14px; line-height:1.45; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--ink);}
+.remind-actions{display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;}
+.remind-actions .btn{flex:1 1 130px;}
+
+/* ================= Ota-ona sahifasi (ommaviy, faqat o'qish) ================= */
+.parent-page{max-width:640px; margin:0 auto; padding:56px 14px 40px;}
+.parent-head{text-align:center; margin-bottom:16px;}
+.parent-brand{font-weight:900; letter-spacing:.8px; color:var(--teal-dk); font-size:20px;}
+.parent-page .card{margin-bottom:12px;}
+.parent-page h3{margin:0 0 10px; font-size:15px;}
+.parent-tiles{display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:14px;}
+.parent-tile{border:1px solid var(--line); border-radius:12px; padding:12px 6px; text-align:center; background:var(--paper-2);}
+.parent-tile .v{font-size:24px; font-weight:800; color:var(--ink);}
+.parent-tile .l{font-size:11.5px; color:var(--ink-soft); font-weight:600; margin-top:2px;}
+.parent-month{padding:10px 0; border-top:1px solid var(--line);}
+.parent-month:first-of-type{border-top:none; padding-top:0;}
+.parent-month-h{display:flex; justify-content:space-between; align-items:baseline; gap:8px; margin-bottom:8px; flex-wrap:wrap;}
+.parent-grades{display:flex; flex-wrap:wrap; gap:8px;}
+.parent-gr{display:inline-flex; flex-direction:column; align-items:center; gap:3px;}
+.parent-gr small{font-size:10.5px; color:var(--ink-soft); font-weight:600;}
+.parent-gr .grade{width:32px; height:32px; font-size:15px;}
+.parent-foot{text-align:center; font-size:12px; margin-top:18px;}
+@media (max-width:420px){.parent-tile .v{font-size:20px;}}
